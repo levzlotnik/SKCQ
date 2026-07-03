@@ -2,11 +2,11 @@ orchestrator_host: jaguar   # this machine's tailscale hostname (for remote work
 port: 5555
 
 workers:
-  # - name: strix-3090
-  #   host: localhost         # local subprocess, no SSH
-  #   venv: cuda/.venv/bin/python
-  #   workdir: "."
-  #   device: cuda
+  - name: strix-3090
+    host: localhost         # local subprocess, no SSH
+    venv: cuda/.venv/bin/python
+    workdir: "."
+    device: cuda
 
   # - name: tiger
   #   host: tiger             # tailscale hostname
