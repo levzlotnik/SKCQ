@@ -38,7 +38,7 @@ for label in "${configs[@]}"; do
         echo "  -> building codebooks into ${out_dir}/"
     fi
 
-    rocm/.venv/bin/python main.py --config "$cfg" --compare \
+    rocm/.venv/bin/python build.py --config "$cfg" --compare \
         --use-cuda-worker --eval-samples "$EVAL_SAMPLES" --kld-tokens "$KLD_TOKENS" \
         2>&1 | tee "$log_file"
 

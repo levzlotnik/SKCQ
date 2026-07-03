@@ -1,6 +1,6 @@
 """ROCm-side client: spawns a CUDA subprocess and offloads build_codebook calls.
 
-Used by main.py / extract_and_build_codebooks to run k-means on the 3090
+Used by build.py / extract_and_build_codebooks to run k-means on the 3090
 instead of the Strix Halo iGPU. Tensors flow through /dev/shm files or
 POSIX SharedMemory, referenced by name in the RPC params.
 """

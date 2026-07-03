@@ -45,7 +45,7 @@ for cfg in "${configs[@]}"; do
         echo "  -> building codebooks into ${out_dir}/"
     fi
 
-    rocm/.venv/bin/python main.py --config "$cfg" --compare --use-cuda-worker --baseline-cache baseline.pt $EVAL_ARG 2>&1 | tee "$log_file"
+    rocm/.venv/bin/python build.py --config "$cfg" --compare --use-cuda-worker --baseline-cache baseline.pt $EVAL_ARG 2>&1 | tee "$log_file"
 
     echo "  -> done (see ${out_dir}/ and ${log_file})"
     echo
