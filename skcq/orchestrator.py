@@ -225,14 +225,13 @@ class Orchestrator:
                     with self.results_lock:
                         self.layer_results[msg.layer] = msg.data
                         self.completed += 1
-                        _save_layer_results(
-                            msg.data,
-                            self.output_dir,
-                            msg.layer,
-                            self.model_config.hidden_size,
-                            self.model_config.moe_intermediate_size,
-                            self.model_config.num_experts,
-                        )
+                    _save_layer_results(
+                        msg.data,
+                        self.output_dir,
+                        msg.layer,
+                        self.model_config.hidden_size,
+                        self.model_config.moe_intermediate_size,
+                    )
                     current_job = None
                     logger.info(
                         "Layer %d complete (%d/%d)",
