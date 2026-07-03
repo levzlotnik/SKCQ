@@ -20,48 +20,30 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import pickle
 import socket
-import struct
 import sys
 from pathlib import Path
-from typing import Any
 
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
 from skcq.clustering import CodebookParams, CodebookResult, build_codebook
+from skcq.protocol import (
+    DoneMessage,
+    ErrorMessage,
+    JobMessage,
+    Message,
+    ReadyMessage,
+    ResultsMessage,
+    recv_frame,
+    send_frame,
+)
 
 logger = logging.getLogger("skcq.worker")
 
-# Reuse the same length-prefixed framing as the orchestrator.
-
-
-def send_frame(sock: socket.socket, obj: Any) -> None:
-    data = pickle.dumps(obj)
-    sock.sendall(struct.pack("!I", len(data)) + data)
-
-
-def recv_frame(sock: socket.socket) -> Any:
-    header = _recv_exactly(sock, 4)
-    if header is None:
-        return None
-    (length,) = struct.unpack("!I", header)
-    data = _recv_exactly(sock, length)
-    if data is None:
-        return None
-    return pickle.loads(data)
-
-
-def _recv_exactly(sock: socket.socket, n: int) -> bytes | None:
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            return None
-        buf.extend(chunk)
-    return bytes(buf)
+LayerShardMap = dict[int, dict[str, str]]
+ProjectionRows = dict[str, torch.Tensor]
 
 
 def resolve_device(device: str) -> torch.device:
@@ -74,7 +56,7 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def build_layer_shard_map(model_dir: Path) -> dict[int, dict[str, str]]:
+def build_layer_shard_map(model_dir: Path) -> LayerShardMap:
     """Parse model.safetensors.index.json → {layer_idx: {gate_up: shard, down: shard}}."""
     index_path = model_dir / "model.safetensors.index.json"
     if not index_path.exists():
@@ -84,7 +66,7 @@ def build_layer_shard_map(model_dir: Path) -> dict[int, dict[str, str]]:
         idx = json.load(f)
 
     weight_map: dict[str, str] = idx["weight_map"]
-    layer_shards: dict[int, dict[str, str]] = {}
+    layer_shards: LayerShardMap = {}
 
     for key, shard in weight_map.items():
         if not key.startswith("model.language_model.layers."):
@@ -116,11 +98,11 @@ def _extract_layer_idx(key: str) -> int | None:
 def extract_rows(
     model_dir: Path,
     layer_idx: int,
-    layer_shards: dict[int, dict[str, str]],
+    layer_shards: LayerShardMap,
     num_experts: int,
     hidden_size: int,
     intermediate_size: int,
-) -> dict[str, torch.Tensor]:
+) -> ProjectionRows:
     """Extract gate, up, down weight rows from safetensors for one layer.
 
     Returns:
@@ -129,7 +111,7 @@ def extract_rows(
          "down": (num_experts * hidden_size, intermediate_size)}
     """
     shards = layer_shards[layer_idx]
-    proj_rows: dict[str, torch.Tensor] = {}
+    proj_rows: ProjectionRows = {}
 
     gate_up_path = model_dir / shards["gate_up"]
     with safe_open(gate_up_path, framework="pt", device="cpu") as f:
@@ -153,20 +135,19 @@ def extract_rows(
 
 
 def process_job(
-    job: dict[str, Any],
+    job: JobMessage,
     model_dir: Path,
-    layer_shards_map: dict[int, dict[str, str]],
+    layer_shards_map: LayerShardMap,
     device: torch.device,
+    chunk_budget_mb: int,
 ) -> dict[str, CodebookResult]:
     """Process one layer job: extract rows, build codebooks for all 3 projections."""
-    layer_idx = job["layer"]
-    params = CodebookParams(**job["params"])
-    num_experts = job["num_experts"]
-    hidden_size = job["hidden_size"]
-    intermediate_size = job["intermediate_size"]
-    n_blocks_gu = params.n_blocks_gate_up
-    n_blocks_dn = params.n_blocks_down
-    n_codebooks = params.n_codebooks
+    layer_idx = job.layer
+    params = CodebookParams(**job.params)
+    params.chunk_budget_mb = chunk_budget_mb
+    num_experts = job.num_experts
+    hidden_size = job.hidden_size
+    intermediate_size = job.intermediate_size
 
     logger.info("Layer %d: extracting rows from safetensors...", layer_idx)
     rows_map = extract_rows(
@@ -176,21 +157,27 @@ def process_job(
     results: dict[str, CodebookResult] = {}
 
     projections = [
-        ("gate", rows_map["gate"], params.k_gate, n_blocks_gu, intermediate_size),
-        ("up", rows_map["up"], params.k_up, n_blocks_gu, intermediate_size),
-        ("down", rows_map["down"], params.k_down, n_blocks_dn, hidden_size),
+        ("gate", rows_map["gate"], params.k_gate, params.n_blocks_gate_up, intermediate_size),
+        ("up", rows_map["up"], params.k_up, params.n_blocks_gate_up, intermediate_size),
+        ("down", rows_map["down"], params.k_down, params.n_blocks_down, hidden_size),
     ]
 
     for name, rows, k, n_blocks, out_dim in projections:
         cb_name = f"L{layer_idx}.{name}"
-        logger.info("Layer %d: building %s (k=%d, nb=%d, cb=%d)...",
-                    layer_idx, name, k, n_blocks, n_codebooks)
+        logger.info(
+            "Layer %d: building %s (k=%d, nb=%d, cb=%d)...",
+            layer_idx,
+            name,
+            k,
+            n_blocks,
+            params.n_codebooks,
+        )
         results[name] = build_codebook(
             rows=rows.to(device),
             params=params,
             k=k,
             n_blocks=n_blocks,
-            n_codebooks=n_codebooks,
+            n_codebooks=params.n_codebooks,
             num_experts=num_experts,
             out_dim=out_dim,
             device=device,
@@ -208,11 +195,18 @@ def main() -> None:
     )
     parser.add_argument("--model-id", required=True, help="HuggingFace model ID")
     parser.add_argument("--device", default="auto", help="Device: cuda, mps, cpu, or auto")
+    parser.add_argument("--name", default="worker", help="Worker name for logging")
+    parser.add_argument(
+        "--chunk-budget-mb",
+        type=int,
+        default=2048,
+        help="Memory budget (MB) for k-means chunking — reduce for low-VRAM GPUs",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        format=f"%(asctime)s [{args.name}] %(levelname)s %(message)s",
         stream=sys.stderr,
     )
 
@@ -235,30 +229,31 @@ def main() -> None:
 
     try:
         while True:
-            send_frame(sock, {"type": "ready", "device": str(device)})
-            job = recv_frame(sock)
-            if job is None:
+            send_frame(sock, ReadyMessage(device=str(device)))
+            msg: Message | None = recv_frame(sock)
+            if msg is None:
                 logger.error("Orchestrator closed connection")
                 break
-            if job.get("type") == "done":
+            if isinstance(msg, DoneMessage):
                 logger.info("Orchestrator says done — exiting")
                 break
-            if job.get("type") != "job":
-                logger.error("Unexpected message from orchestrator: %s", job)
+            if not isinstance(msg, JobMessage):
+                logger.error("Unexpected message from orchestrator: %s", msg)
                 continue
 
-            layer_idx = job["layer"]
-            logger.info("Received job for layer %d", layer_idx)
+            logger.info("Received job for layer %d", msg.layer)
             try:
-                results = process_job(job, model_dir, layer_shards_map, device)
-                send_frame(sock, {"type": "results", "layer": layer_idx, "data": results})
+                results = process_job(
+                    msg, model_dir, layer_shards_map, device, args.chunk_budget_mb
+                )
+                send_frame(sock, ResultsMessage(layer=msg.layer, data=results))
                 ack = recv_frame(sock)
-                if ack is not None and ack.get("type") == "done":
+                if isinstance(ack, DoneMessage):
                     logger.info("Orchestrator says done after results — exiting")
                     break
             except (RuntimeError, ValueError, KeyError, OSError) as e:
-                logger.exception("Error processing layer %d", layer_idx)
-                send_frame(sock, {"type": "error", "layer": layer_idx, "msg": str(e)})
+                logger.exception("Error processing layer %d", msg.layer)
+                send_frame(sock, ErrorMessage(layer=msg.layer, msg=str(e)))
     finally:
         sock.close()
         logger.info("Worker shut down")

@@ -23,17 +23,11 @@ from pathlib import Path
 
 import torch
 
-from build import text_model_config
 from skcq.config import ExperimentConfig
-from skcq.eval_model import (
-    capture_reference_logits,
-    compute_perplexity,
-    get_calibration_text,
-    install_routing_capture,
-    load_model,
-)
+from skcq.eval_model import compute_perplexity, get_calibration_text, load_model
 from skcq.logging_setup import setup_logging
-from skcq.metrics import remove_hooks
+from skcq.metrics import capture_reference_logits, install_routing_capture, remove_hooks
+from skcq.protocol import ModelConfig
 
 logger = logging.getLogger("skcq")
 
@@ -47,21 +41,22 @@ def run_distributed(
     baseline_cache: Path | None = None,
 ) -> None:
     """Compute baseline locally, then distribute codebook build across workers."""
+    from transformers import AutoConfig
+
     from skcq.orchestrator import Orchestrator
 
-    logger.info("Loading model for baseline computation...")
-    model, tokenizer = load_model(exp_config.model_id, device)
-    config = text_model_config(model)
+    hf_config = AutoConfig.from_pretrained(exp_config.model_id, trust_remote_code=True)
+    if hasattr(hf_config, "text_config"):
+        hf_config = hf_config.text_config
 
-    num_experts = config.num_experts
-    hidden_size = config.hidden_size
-    intermediate_size = config.moe_intermediate_size
-    num_layers = config.num_hidden_layers
+    model_config = ModelConfig(
+        num_experts=hf_config.num_experts,
+        hidden_size=hf_config.hidden_size,
+        moe_intermediate_size=hf_config.moe_intermediate_size,
+    )
+    num_layers = hf_config.num_hidden_layers
 
-    text = get_calibration_text(exp_config.eval_samples)
-    encodings = tokenizer(text, return_tensors="pt")
-    input_ids = encodings.input_ids.to(model.device)
-
+    baseline_valid = False
     if baseline_cache is not None and baseline_cache.exists():
         logger.info("Loading baseline from %s...", baseline_cache)
         baseline = torch.load(baseline_cache, weights_only=False)
@@ -74,9 +69,17 @@ def run_distributed(
             )
             baseline_cache.unlink()
         else:
+            baseline_valid = True
             logger.info("Baseline ppl: %.4f (cached)", baseline["base_ppl"])
 
-    if baseline_cache is not None and not baseline_cache.exists():
+    if not baseline_valid:
+        logger.info("Loading model for baseline computation...")
+        model, tokenizer = load_model(exp_config.model_id, device)
+
+        text = get_calibration_text(exp_config.eval_samples)
+        encodings = tokenizer(text, return_tensors="pt")
+        input_ids = encodings.input_ids.to(model.device)
+
         logger.info("Computing BASELINE perplexity...")
         base_ppl = compute_perplexity(model, tokenizer, text)
         logger.info("Baseline perplexity: %.4f", base_ppl)
@@ -101,19 +104,15 @@ def run_distributed(
             )
             logger.info("Saved baseline to %s", baseline_cache)
 
-    del model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     logger.info("Starting distributed build with %d layers...", num_layers)
     orch = Orchestrator(
         exp_config=exp_config,
         workers_yaml=workers_yaml,
-        model_config={
-            "num_experts": num_experts,
-            "hidden_size": hidden_size,
-            "moe_intermediate_size": intermediate_size,
-        },
+        model_config=model_config,
         output_dir=codebook_dir,
         num_layers=num_layers,
     )
@@ -121,9 +120,9 @@ def run_distributed(
 
     meta = exp_config.model_dump()
     meta["model_config"] = {
-        "num_experts": num_experts,
-        "moe_intermediate_size": intermediate_size,
-        "hidden_size": hidden_size,
+        "num_experts": model_config.num_experts,
+        "moe_intermediate_size": model_config.moe_intermediate_size,
+        "hidden_size": model_config.hidden_size,
         "num_layers": num_layers,
     }
     (codebook_dir / "config.json").write_text(json.dumps(meta, indent=2, default=str))

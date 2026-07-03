@@ -44,6 +44,10 @@ class CodebookParams(BaseModel):
         default=1.0,
         description="K multiplier for residual codebooks. K_c = K_0 * k_residual_mult^c",
     )
+    chunk_budget_mb: int = Field(
+        default=2048,
+        description="Memory budget (MB) for k-means chunking — reduce for low-VRAM GPUs",
+    )
 
 
 class LayerOverride(BaseModel):
@@ -59,6 +63,28 @@ class LayerOverride(BaseModel):
     norm_threshold: float | None = None
     skip_zeros: bool | None = None
     k_residual_mult: float | None = None
+    chunk_budget_mb: int | None = None
+
+
+@dataclass
+class BlockClusterResult:
+    """Result of clustering one block's sub-vectors.
+
+    For cosine (spherical): codebook holds unit-norm directions, scale = dot(data, centroid).
+    For euclidean (l2): codebook holds raw centroids (direct reconstruction), scale = 0.
+
+    Shapes:
+        codebook:  (block_size, K) — BMM-ready (transposed from kmeans output)
+        labels:    (n_rows,) int64 — 0 for zero blocks
+        scales:    (n_rows,) — 0 for zero blocks (zeros for euclidean)
+        recon:     (n_rows, block_size) — scale * centroid[assign] (cosine) or
+                   centroid[assign] (euclidean); 0 for zero blocks
+    """
+
+    codebook: torch.Tensor
+    labels: torch.Tensor
+    scales: torch.Tensor
+    recon: torch.Tensor
 
 
 @dataclass
@@ -97,7 +123,8 @@ def _cluster_block(
     device: torch.device,
     name: str,
     distance_metric: DistanceMetric = "cosine",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    chunk_budget_mb: int = 2048,
+) -> BlockClusterResult:
     """Cluster one block's sub-vectors.
 
     Args:
@@ -105,13 +132,6 @@ def _cluster_block(
         distance_metric: "cosine" (spherical k-means, centroids re-normalized,
             scale = dot(data, centroid)) or "euclidean" (l2 k-means, centroids
             are the raw reconstruction, scale unused/zero).
-
-    Returns:
-        codebook_b: (block_size, K) — BMM-ready (transposed from kmeans output)
-        labels_full: (n_rows,) int64 — 0 for zero blocks
-        scales_full: (n_rows,) — 0 for zero blocks (zeros for euclidean)
-        recon_b: (n_rows, block_size) — scale * centroid[assign] (cosine) or
-            centroid[assign] (euclidean); 0 for zero blocks
     """
     n_rows, block_size = block_data.shape
     block_norms = block_data.norm(dim=-1)
@@ -131,11 +151,12 @@ def _cluster_block(
         block_zero = torch.zeros(n_rows, dtype=torch.bool, device=block_data.device)
 
     if non_zero.shape[0] == 0:
-        codebook_b = torch.zeros(block_size, k, dtype=torch.float32, device=device)
-        labels_full = torch.zeros(n_rows, dtype=torch.long, device=block_data.device)
-        scales_full = torch.zeros(n_rows, dtype=torch.float32, device=block_data.device)
-        recon_b = torch.zeros(n_rows, block_size, dtype=torch.float32, device=device)
-        return codebook_b, labels_full, scales_full, recon_b
+        return BlockClusterResult(
+            codebook=torch.zeros(block_size, k, dtype=torch.float32, device=device),
+            labels=torch.zeros(n_rows, dtype=torch.long, device=block_data.device),
+            scales=torch.zeros(n_rows, dtype=torch.float32, device=block_data.device),
+            recon=torch.zeros(n_rows, block_size, dtype=torch.float32, device=device),
+        )
 
     logger.info(
         "[%s] clustering %d block-rows, k=%d, metric=%s",
@@ -146,7 +167,8 @@ def _cluster_block(
     )
 
     k_eff = min(k, non_zero.shape[0])
-    chunk_size = max(1, (2 * 1024**3) // (k_eff * 4))
+    budget_bytes = chunk_budget_mb * 1024 * 1024
+    chunk_size = max(1, budget_bytes // (k_eff * 4))
     chunk_size = min(chunk_size, non_zero.shape[0])
 
     if distance_metric == "cosine":
@@ -202,7 +224,12 @@ def _cluster_block(
     )
 
     codebook_b = centroids_kbd.t().contiguous()
-    return codebook_b, labels_full, scales_full, recon_b
+    return BlockClusterResult(
+        codebook=codebook_b,
+        labels=labels_full,
+        scales=scales_full,
+        recon=recon_b,
+    )
 
 
 def build_codebook(
@@ -269,7 +296,7 @@ def build_codebook(
         block_assigns: list[torch.Tensor] = []
         for b in range(n_blocks):
             block_data = unit_residual[:, b, :]
-            codebook_b, labels_b, _scales_b, _recon_b = _cluster_block(
+            result_b = _cluster_block(
                 block_data,
                 k=k_c,
                 max_iters=params.max_iters,
@@ -278,10 +305,11 @@ def build_codebook(
                 device=device,
                 name=f"{name} cb={c}/{n_codebooks} blk={b}/{n_blocks}",
                 distance_metric=metric,
+                chunk_budget_mb=params.chunk_budget_mb,
             )
-            block_codebooks.append(codebook_b)
-            block_assigns.append(labels_b)
-            subtract = codebook_b.t()[labels_b]
+            block_codebooks.append(result_b.codebook)
+            block_assigns.append(result_b.labels)
+            subtract = result_b.codebook.t()[result_b.labels]
             subtract[zero_mask] = 0.0
             unit_residual[:, b, :] = unit_residual[:, b, :] - subtract
         cb_codebooks.append(torch.stack(block_codebooks, dim=0))

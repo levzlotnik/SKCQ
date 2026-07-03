@@ -1,12 +1,12 @@
-orchestrator_host: strix   # this machine's tailscale hostname (for remote workers to connect back)
+orchestrator_host: jaguar   # this machine's tailscale hostname (for remote workers to connect back)
 port: 5555
 
 workers:
-  - name: strix-3090
-    host: localhost         # local subprocess, no SSH
-    venv: cuda/.venv/bin/python
-    workdir: "."
-    device: cuda
+  # - name: strix-3090
+  #   host: localhost         # local subprocess, no SSH
+  #   venv: cuda/.venv/bin/python
+  #   workdir: "."
+  #   device: cuda
 
   - name: tiger
     host: tiger             # tailscale hostname
@@ -19,3 +19,4 @@ workers:
     venv: .venv/bin/python
     workdir: "~/Projects/SKCQ"
     device: auto
+    chunk_budget_mb: 512    # 12GB VRAM — keep chunks small
