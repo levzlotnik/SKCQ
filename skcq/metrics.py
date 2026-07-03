@@ -211,7 +211,10 @@ def capture_reference_logits(
 def kld_against_reference(
     model: Module, input_ids: torch.Tensor, reference_logits: torch.Tensor
 ) -> float:
-    """Mean KL(reference || model) over tokens, computed on the reference chunk."""
+    """Mean KL(reference || model) over tokens, computed on the reference chunk.
+
+    Chunked over the token dimension to avoid OOM on low-VRAM GPUs.
+    """
     chunk_len = reference_logits.shape[0] + 1
     chunk = input_ids[:, :chunk_len]
     outputs = model(chunk)
@@ -221,11 +224,17 @@ def kld_against_reference(
     ref = reference_logits[:n].to(logits.device)
     hyp = logits[:n].to(logits.device)
 
-    log_p = F.log_softmax(ref, dim=-1)
-    log_q = F.log_softmax(hyp, dim=-1)
-    p = log_p.exp()
-    kl = (p * (log_p - log_q)).sum(dim=-1)
-    return float(kl.mean().item())
+    total_kl = 0.0
+    token_chunk = 256
+    for i in range(0, n, token_chunk):
+        j = min(i + token_chunk, n)
+        log_p = F.log_softmax(ref[i:j], dim=-1)
+        log_q = F.log_softmax(hyp[i:j], dim=-1)
+        p = log_p.exp()
+        kl = (p * (log_p - log_q)).sum(dim=-1)
+        total_kl += float(kl.sum().item())
+
+    return total_kl / n
 
 
 @torch.no_grad()
