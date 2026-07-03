@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+*/.venv/
+
+# Large artifacts
+baseline.pt
+*.pt
+!tests/*.pt
+codebooks*/
+compare*.json
+measurements.json
+
+# Logs
+*.log
+run.log
+sweep_logs/
+
+# Model cache (don't commit downloaded weights)
+*.safetensors
+
+# Opencode / editor
+.opencode/
+
+# POC sandbox
+poc/

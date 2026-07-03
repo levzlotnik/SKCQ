@@ -1,0 +1,26 @@
+[project]
+name = "skcq-cuda"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "accelerate",
+    "datasets>=5.0.0",
+    "json-rpc>=1.15.0",
+    "numpy>=2.0",
+    "pt-kmeans>=0.9.2",
+    "pydantic>=2.13.4",
+    "safetensors",
+    "torch==2.12.1+cu132",
+    "transformers>=5.0.0",
+]
+
+[[tool.uv.index]]
+name = "cuda"
+url = "https://download.pytorch.org/whl/cu132"
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple/"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"

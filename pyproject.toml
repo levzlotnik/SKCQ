@@ -1,0 +1,15 @@
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+extend-exclude = ["poc"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+ignore = ["N812", "TC001", "TC002", "TC003"]
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

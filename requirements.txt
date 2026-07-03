@@ -1,0 +1,5 @@
+--index-url https://repo.amd.com/rocm/whl/gfx1151/ 
+torch==2.11.0+rocm7.13.0
+torchvision==0.26.0+rocm7.13.0
+torchaudio==2.11.0+rocm7.13.0
+
