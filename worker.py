@@ -87,6 +87,8 @@ def build_layer_shard_map(model_dir: Path) -> dict[int, dict[str, str]]:
     layer_shards: dict[int, dict[str, str]] = {}
 
     for key, shard in weight_map.items():
+        if not key.startswith("model.language_model.layers."):
+            continue
         if ".mlp.experts.gate_up_proj" in key:
             ln = _extract_layer_idx(key)
             if ln is not None:
