@@ -26,9 +26,6 @@ sweep_logs/
 # Model cache (don't commit downloaded weights)
 *.safetensors
 
-# Opencode / editor
-.opencode/
-
 # POC sandbox
 poc/
 some_math/.lake/
