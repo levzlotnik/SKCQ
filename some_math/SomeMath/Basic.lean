@@ -1,0 +1,2 @@
+-- Product Quantization Geometry: Proof Skeletons
+-- This file is the root of the SomeMath library.

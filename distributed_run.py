@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Distributed codebook build: orchestrates workers across multiple machines.
+"""Distributed codebook build using Ray actors.
 
-Computes the baseline on the local GPU (Strix Halo iGPU), then distributes
-codebook building across all configured workers (local 3090 + remote machines
-via SSH/tailscale). Workers read safetensors directly — no model loading on
-workers, no shared memory, no RPC beyond simple TCP.
+Computes the baseline on the local GPU, then distributes codebook building
+across Ray actors on local and remote machines.
 
 Usage:
     rocm/.venv/bin/python distributed_run.py --config configs/sweep/kbs16_nb4_cb2.yaml \\
@@ -22,6 +20,9 @@ import logging
 from pathlib import Path
 
 import torch
+import yaml
+
+import ray
 
 from skcq.config import ExperimentConfig
 from skcq.eval_model import compute_perplexity, get_calibration_text, load_model
@@ -40,10 +41,12 @@ def run_distributed(
     kld_tokens: int,
     baseline_cache: Path | None = None,
 ) -> None:
-    """Compute baseline locally, then distribute codebook build across workers."""
+    """Compute baseline locally, then distribute codebook build across Ray actors."""
     from transformers import AutoConfig
 
-    from skcq.orchestrator import Orchestrator
+    from skcq.orchestrator import _save_layer_results
+    from skcq.clustering import CodebookParams
+    from skcq.ray_worker import WorkerActor
 
     hf_config = AutoConfig.from_pretrained(exp_config.model_id, trust_remote_code=True)
     if hasattr(hf_config, "text_config"):
@@ -56,6 +59,7 @@ def run_distributed(
     )
     num_layers = hf_config.num_hidden_layers
 
+    # ---- Baseline computation ----
     baseline_valid = False
     if baseline_cache is not None and baseline_cache.exists():
         logger.info("Loading baseline from %s...", baseline_cache)
@@ -108,16 +112,122 @@ def run_distributed(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    logger.info("Starting distributed build with %d layers...", num_layers)
-    orch = Orchestrator(
-        exp_config=exp_config,
-        workers_yaml=workers_yaml,
-        model_config=model_config,
-        output_dir=codebook_dir,
-        num_layers=num_layers,
-    )
-    orch.run()
+    # ---- Ray actor setup ----
+    logger.info("Initializing Ray...")
+    ray.init(address="auto", ignore_reinit_error=True)
+    logger.info("Ray initialized.")
 
+    # Parse workers.yaml
+    with open(workers_yaml) as f:
+        workers_raw = yaml.safe_load(f)
+
+    repo_root = Path(__file__).resolve().parent.parent
+
+    workers = workers_raw["workers"]
+
+    # Build list of actor references
+    actor_refs: list[ray.ObjectRef] = []
+    for w in workers:
+        name = w["name"]
+        host = w["host"]
+        device = w.get("device", "auto")
+        chunk_budget_mb = w.get("chunk_budget_mb", 2048)
+        venv_path = repo_root / w["venv"]
+
+        kwargs: dict = {
+            "model_id": exp_config.model_id,
+            "device": device,
+            "chunk_budget_mb": chunk_budget_mb,
+        }
+
+        if host in ("localhost", "127.0.0.1"):
+            kwargs["runtime_env"] = {"py_executable": str(venv_path)}
+
+        actor_ref = WorkerActor.options(
+            num_gpus=1, max_restarts=3, max_task_retries=2
+        ).remote(**kwargs)
+        actor_refs.append(actor_ref)
+
+        logger.info(
+            "Created WorkerActor '%s' (host=%s, device=%s, chunk_budget_mb=%d)",
+            name,
+            host,
+            device,
+            chunk_budget_mb,
+        )
+
+    # Build job queue — skip layers that already have saved codebooks
+    skipped: list[int] = []
+    job_queue: list[tuple[int, CodebookParams]] = []
+    for i in range(num_layers):
+        layer_dir = codebook_dir / f"layer_{i}"
+        if all((layer_dir / f"{n}.pt").exists() for n in ("gate", "up", "down")):
+            skipped.append(i)
+        else:
+            job_queue.append((i, exp_config.params_for_layer(i)))
+
+    if skipped:
+        logger.info("Resuming: %d layers already saved, %d to build", len(skipped), len(job_queue))
+
+    # Submit jobs round-robin across actors
+    pending_refs: list[ray.ObjectRef] = []
+    ref_to_layer: dict[ray.ObjectRef, int] = {}
+    actor_idx = 0
+    for layer_idx, params in job_queue:
+        ref = actor_refs[actor_idx % len(actor_refs)].process_layer.remote(
+            layer=layer_idx,
+            params=params.model_dump(),
+            num_experts=model_config.num_experts,
+            hidden_size=model_config.hidden_size,
+            intermediate_size=model_config.moe_intermediate_size,
+        )
+        pending_refs.append(ref)
+        ref_to_layer[ref] = layer_idx
+        actor_idx += 1
+
+    logger.info(
+        "Submitted %d layer jobs across %d actors (%d skipped)",
+        len(pending_refs),
+        len(actor_refs),
+        len(skipped),
+    )
+
+    # Wait for results as they complete
+    completed = len(skipped)
+    while pending_refs:
+        done_refs, _, still_pending = ray.wait(pending_refs, num_returns=1, timeout=60)
+
+        if not done_refs:
+            logger.warning("ray.wait timed out — waiting for remaining %d jobs", len(pending_refs))
+            continue
+
+        for ref in done_refs:
+            result = ray.get(ref)
+            pending_refs.remove(ref)
+            layer_idx = ref_to_layer.pop(ref)
+
+            _save_layer_results(
+                result,
+                codebook_dir,
+                layer_idx,
+                model_config.hidden_size,
+                model_config.moe_intermediate_size,
+            )
+
+            logger.info("Layer %d complete (%d/%d)", layer_idx, completed + 1, num_layers)
+            completed += 1
+
+            if completed >= num_layers:
+                break
+
+        if completed >= num_layers:
+            break
+
+    if completed < num_layers:
+        logger.error("Only %d/%d layers completed", completed, num_layers)
+        raise RuntimeError(f"Build incomplete: {completed}/{num_layers} layers finished")
+
+    # Save metadata
     meta = exp_config.model_dump()
     meta["model_config"] = {
         "num_experts": model_config.num_experts,

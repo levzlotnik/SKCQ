@@ -5,5 +5,20 @@
     "websearch": "allow",
     "webfetch": "allow",
     "lsp": "allow"
+  },
+  "mcp": {
+    "lean-lsp": {
+      "type": "local",
+      "command": ["uvx", "lean-lsp-mcp"],
+      "env": {
+        "LEAN_PROJECT_PATH": "/home/levzlotnik/Projects/SKCQ/some_math",
+        "LEAN_LOG_LEVEL": "INFO"
+      }
+    }
+  },
+  "skills": {
+    "paths": [
+      "/home/levzlotnik/Projects/lean4-skills/plugins/lean4/skills/lean4"
+    ]
   }
 }

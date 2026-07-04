@@ -1,0 +1,26 @@
+model_id: Qwen/Qwen3.6-35B-A3B
+defaults:
+  k_gate: 131072
+  k_up: 131072
+  k_down: 32768
+  n_blocks_gate_up: 2
+  n_blocks_down: 2
+  n_codebooks: 1
+  max_iters: 100
+  norm_threshold: 0.001
+  skip_zeros: true
+  k_residual_mult: 0.5
+layer_overrides:
+  '0':
+    k_gate: null
+    k_up: null
+    k_down: null
+    n_blocks_gate_up: null
+    n_blocks_down: null
+    n_codebooks: null
+    max_iters: null
+    norm_threshold: 0.001
+    skip_zeros: true
+    k_residual_mult: null
+eval_samples: 100
+output_dir: codebooks_kbs128_nb2_cb1

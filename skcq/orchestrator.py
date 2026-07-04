@@ -140,13 +140,26 @@ class Orchestrator:
 
         self.workers_config = _load_workers_config(workers_yaml)
 
-        self.job_queue: queue.Queue[int | None] = queue.Queue()
+        self.job_queue: queue.Queue[int] = queue.Queue()
+        skipped: list[int] = []
         for i in range(num_layers):
-            self.job_queue.put(i)
-        self.job_queue.put(None)  # sentinel
+            layer_dir = output_dir / f"layer_{i}"
+            if all(
+                (layer_dir / f"{n}.pt").exists()
+                for n in ("gate", "up", "down")
+            ):
+                skipped.append(i)
+            else:
+                self.job_queue.put(i)
+        if skipped:
+            logger.info("Resuming: %d layers already saved, %d to build",
+                        len(skipped), num_layers - len(skipped))
+        # No sentinel — workers get DoneMessage when all layers complete,
+        # tracked via self.completed. A sentinel would strand re-queued jobs
+        # behind it in the FIFO queue after a worker timeout.
 
         self.results_lock = threading.Lock()
-        self.completed = 0
+        self.completed = len(skipped)
         self.layer_results: dict[int, LayerResults] = {}
         self.worker_procs: list[subprocess.Popen[bytes]] = []
         self.shutdown = threading.Event()
@@ -207,11 +220,19 @@ class Orchestrator:
                     return
 
                 if isinstance(msg, ReadyMessage):
-                    job_idx = self.job_queue.get()
-                    if job_idx is None:
+                    while not self.shutdown.is_set():
+                        try:
+                            job_idx = self.job_queue.get(timeout=1)
+                        except queue.Empty:
+                            if self.completed >= self.num_layers:
+                                send_frame(conn, DoneMessage())
+                                return
+                            continue
+                        current_job = job_idx
+                        break
+                    if self.shutdown.is_set():
                         send_frame(conn, DoneMessage())
                         return
-                    current_job = job_idx
                     job = _build_job(
                         self.exp_config,
                         self.model_id,
@@ -266,6 +287,7 @@ class Orchestrator:
         except (ConnectionError, OSError) as e:
             logger.warning("Worker %s connection failed: %s", worker_name, e)
             if current_job is not None:
+                logger.info("Re-queueing layer %d (connection lost)", current_job)
                 self.job_queue.put(current_job)
         finally:
             conn.close()
@@ -283,10 +305,11 @@ class Orchestrator:
         self._launch_workers()
 
         threads: list[threading.Thread] = []
-        timeout = 600  # 10 min per worker connection
+        timeout = 7200  # 2h per worker connection (large K layers take ~30 min)
 
         while self.completed < self.num_layers and not self.shutdown.is_set():
             try:
+                server.settimeout(1.0)
                 conn, addr = server.accept()
                 conn.settimeout(timeout)
                 t = threading.Thread(

@@ -8,11 +8,11 @@ workers:
     workdir: "."
     device: cuda
 
-  - name: jaguar-strix
-    host: localhost         # local subprocess, no SSH
-    venv: rocm/.venv/bin/python
-    workdir: "."
-    device: cuda
+  # - name: jaguar-strix
+  #   host: localhost         # local subprocess, no SSH
+  #   venv: rocm/.venv/bin/python
+  #   workdir: "."
+  #   device: cuda
 
   # - name: tiger
   #   host: tiger             # tailscale hostname

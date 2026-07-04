@@ -301,7 +301,7 @@ def build_codebook(
                 k=k_c,
                 max_iters=params.max_iters,
                 norm_threshold=params.norm_threshold,
-                skip_zeros=params.skip_zeros,
+                skip_zeros=params.skip_zeros if c == 0 else False,
                 device=device,
                 name=f"{name} cb={c}/{n_codebooks} blk={b}/{n_blocks}",
                 distance_metric=metric,

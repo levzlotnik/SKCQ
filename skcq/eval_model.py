@@ -84,11 +84,35 @@ def compute_perplexity(
             target_chunk[:, :-stride] = -100
 
         with torch.no_grad():
-            outputs = model(input_chunk, labels=target_chunk)
-            neg_log_likelihood = outputs.loss * input_chunk.size(1)
+            outputs = model(input_chunk)
+            logits = outputs.logits
 
-        nlls.append(neg_log_likelihood)
-        num_tokens += input_chunk.size(1)
+            # Compute cross-entropy in chunks over the sequence dimension
+            # to avoid OOM on large vocab (151936 * seq_len * 4 bytes in fp32)
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = target_chunk[..., 1:].contiguous()
+            chunk_size = 256
+            total_loss = 0.0
+            total_count = 0
+            for i in range(0, shift_logits.size(1), chunk_size):
+                end_i = min(i + chunk_size, shift_logits.size(1))
+                logit_chunk = shift_logits[:, i:end_i, :].float()
+                label_chunk = shift_labels[:, i:end_i]
+                loss_chunk = torch.nn.functional.cross_entropy(
+                    logit_chunk.reshape(-1, logit_chunk.size(-1)),
+                    label_chunk.reshape(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                )
+                total_loss += loss_chunk.item()
+                total_count += (label_chunk != -100).sum().item()
+                del logit_chunk, loss_chunk
+
+            del logits, shift_logits, outputs
+            neg_log_likelihood = total_loss
+
+        nlls.append(torch.tensor(neg_log_likelihood))
+        num_tokens += total_count
         window_idx = begin_loc // stride
         if window_idx % 10 == 0 or end_loc >= seq_len:
             logger.info(

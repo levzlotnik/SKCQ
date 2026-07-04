@@ -1,0 +1,19 @@
+model_id: "Qwen/Qwen3.6-35B-A3B"
+eval_samples: 1000
+output_dir: "codebooks"
+
+defaults:
+  k_gate: 4096
+  k_up: 4096
+  k_down: 4096
+  n_blocks_gate_up: 1
+  n_blocks_down: 1
+  n_codebooks: 2
+  max_iters: 100
+  norm_threshold: 0.001
+  skip_zeros: true
+
+layer_overrides:
+  0:
+    skip_zeros: true
+    norm_threshold: 0.001
