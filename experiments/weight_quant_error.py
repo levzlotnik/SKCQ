@@ -196,6 +196,7 @@ def run_one_kmeans(
     k_residual_mult: float = 1.0,
     shared_codebook: bool = False,
     sign_split: bool = False,
+    max_iters: int = 100,
     layer_idx: int = 24,
     device: torch.device | None = None,
     chunk_budget_mb: int = 256,
@@ -226,7 +227,7 @@ def run_one_kmeans(
         n_blocks_gate_up=n_blocks, n_blocks_down=n_blocks,
         n_codebooks=n_codebooks,
         k_residual_mult=k_residual_mult,
-        max_iters=100,
+        max_iters=max_iters,
         norm_threshold=0.001,
         skip_zeros=True,
         chunk_budget_mb=chunk_budget_mb,
@@ -296,6 +297,7 @@ def main() -> None:
     parser.add_argument("--shared", action="store_true", help="Use a single shared codebook across all blocks")
     parser.add_argument("--sign-split", action="store_true", help="Extract signs, cluster on first orthant (SSVQ)")
     parser.add_argument("--krm", type=float, default=1.0, help="k_residual_mult: K_c = K * krm^c")
+    parser.add_argument("--kmeans-iters", type=int, default=100, help="Max k-means iterations")
     parser.add_argument("--output", type=str, default=None, help="Output CSV path (default: experiments/weight_quant_error.csv)")
     parser.add_argument("--chunk-budget-mb", type=int, default=256, help="Memory budget for k-means chunking (MB)")
     args = parser.parse_args()
@@ -374,6 +376,7 @@ def main() -> None:
             k_residual_mult=args.krm,
             shared_codebook=args.shared,
             sign_split=args.sign_split,
+            max_iters=args.kmeans_iters,
             layer_idx=args.layer,
             device=device,
             chunk_budget_mb=args.chunk_budget_mb,
