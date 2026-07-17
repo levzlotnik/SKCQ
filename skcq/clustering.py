@@ -509,7 +509,7 @@ def build_codebook(
 
     for c in range(n_codebooks):
         k_c = k_per_codebook[c]
-        metric: DistanceMetric = distance_metric if c == 0 else "euclidean"
+        metric: DistanceMetric = distance_metric
 
         if shared_codebook:
             # Pool all blocks' sub-vectors into one (n_rows * n_blocks, block_size) tensor
