@@ -242,8 +242,7 @@ def _euclidean_kmeans(
         n_empty = empty.sum().item()
         if n_empty > 0:
             new_centroids[empty] = _sobol_unit_cube(n_empty, d, device)
-        else:
-            new_centroids = new_centroids / counts.unsqueeze(-1)
+        new_centroids[~empty] = new_centroids[~empty] / counts[~empty].unsqueeze(-1)
 
         # Check convergence
         moved = (new_centroids - centroids).norm().item()

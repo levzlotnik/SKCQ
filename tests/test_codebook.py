@@ -170,12 +170,13 @@ class TestBuildCodebook:
         )
         assert len(result.codebooks) == N_CODEBOOKS
         assert len(result.assignments) == N_CODEBOOKS
+        n_rows = NUM_EXPERTS * OUT_DIM
         for c in range(N_CODEBOOKS):
             assert result.codebooks[c].shape == (N_BLOCKS, BLOCK_SIZE, K)
-            assert result.assignments[c].shape == (NUM_EXPERTS, N_BLOCKS, OUT_DIM)
+            assert result.assignments[c].shape == (N_BLOCKS, n_rows)
             assert result.assignments[c].dtype == torch.long
-        assert result.scales.shape == (NUM_EXPERTS, N_BLOCKS, OUT_DIM)
-        assert result.zero_mask.shape == (NUM_EXPERTS * OUT_DIM,)
+        assert result.scales.shape == (n_rows, N_BLOCKS)
+        assert result.zero_mask.shape == (n_rows,)
         assert result.n_blocks == N_BLOCKS
         assert result.n_codebooks == N_CODEBOOKS
 
@@ -208,9 +209,9 @@ class TestBuildCodebook:
             final_dir = torch.zeros(n_rows, BLOCK_SIZE)
             for c in range(result.n_codebooks):
                 cb = result.codebooks[c][b]
-                asgn = result.assignments[c][:, b, :].reshape(-1)
+                asgn = result.assignments[c][b]  # (n_rows,)
                 final_dir = final_dir + cb.t()[asgn]
-            scale = result.scales[:, b, :].reshape(-1)
+            scale = result.scales[:, b]  # (n_rows,)
             recon_block = scale.unsqueeze(-1) * final_dir
             recon[:, b * BLOCK_SIZE : (b + 1) * BLOCK_SIZE] = (
                 recon[:, b * BLOCK_SIZE : (b + 1) * BLOCK_SIZE]
@@ -267,9 +268,9 @@ class TestBuildCodebook:
         # zero_mask flags the first row (expert 0, out_idx 0)
         assert result.zero_mask[0]
         # Scale for that row across all blocks should be zero
-        assert result.scales[0, :, 0].sum() == 0
+        assert result.scales[0, :].sum() == 0
         # Other rows should generally have non-zero scales
-        assert result.scales[0, :, 1].abs().sum() > 0
+        assert result.scales[1, :].abs().sum() > 0
 
     def test_unit_sphere_residual(self) -> None:
         """cb1 operates on the unit-sphere residual (unit - centroid_0), not raw residual."""
@@ -297,7 +298,7 @@ class TestBuildCodebook:
         raw_res = raw_blocks.clone()
         for b in range(N_BLOCKS):
             cb0 = result.codebooks[0][b]  # (BLOCK_SIZE, K)
-            asgn0 = result.assignments[0][:, b, :].reshape(-1)  # (n_rows,)
+            asgn0 = result.assignments[0][b]  # (n_rows,)
             centroid0 = cb0.t()[asgn0]  # (n_rows, BLOCK_SIZE) — unit-norm (spherical)
             # New scheme: residual = unit - centroid_0
             new_res[:, b, :] = new_res[:, b, :] - centroid0
@@ -315,7 +316,7 @@ class TestBuildCodebook:
         raw_err = 0.0
         for b in range(N_BLOCKS):
             cb1 = result.codebooks[1][b]  # (BLOCK_SIZE, K1)
-            asgn1 = result.assignments[1][:, b, :].reshape(-1)
+            asgn1 = result.assignments[1][b]
             centroid1 = cb1.t()[asgn1]
             new_err += (new_res[:, b, :] - centroid1).norm(dim=-1).mean().item()
             raw_err += (raw_res[:, b, :] - centroid1).norm(dim=-1).mean().item()
@@ -358,8 +359,8 @@ class TestBuildCodebook:
             name="sscale",
         )
         assert isinstance(result.scales, torch.Tensor)
-        assert result.scales.ndim == 3
-        assert result.scales.shape == (NUM_EXPERTS, N_BLOCKS, OUT_DIM)
+        assert result.scales.ndim == 2
+        assert result.scales.shape == (NUM_EXPERTS * OUT_DIM, N_BLOCKS)
 
     def test_scale_refit(self) -> None:
         """scale = dot(raw, final_direction)/||final_direction||^2 (not just cb0 projection)."""
@@ -382,12 +383,12 @@ class TestBuildCodebook:
             final_dir = torch.zeros(n_rows, BLOCK_SIZE)
             for c in range(result.n_codebooks):
                 cb = result.codebooks[c][b]
-                asgn = result.assignments[c][:, b, :].reshape(-1)
+                asgn = result.assignments[c][b]
                 final_dir = final_dir + cb.t()[asgn]
             expected = (raw_blocks[:, b, :] * final_dir).sum(dim=-1) / (
                 final_dir.norm(dim=-1) ** 2 + 1e-10
             )
-            actual = result.scales[:, b, :].reshape(-1)
+            actual = result.scales[:, b]
             assert torch.allclose(actual.float(), expected, atol=1e-4)
 
         # Also confirm the refit scale differs from the naive cb0-only projection scale,
@@ -395,10 +396,10 @@ class TestBuildCodebook:
         naive_scale = torch.zeros(n_rows)
         for b in range(N_BLOCKS):
             cb0 = result.codebooks[0][b]
-            asgn0 = result.assignments[0][:, b, :].reshape(-1)
+            asgn0 = result.assignments[0][b]
             c0 = cb0.t()[asgn0]
             naive_scale = naive_scale + (raw_blocks[:, b, :] * c0).sum(dim=-1)
-        actual_flat = result.scales.permute(1, 0, 2).reshape(N_BLOCKS, n_rows).sum(dim=0)
+        actual_flat = result.scales.sum(dim=1)
         assert not torch.allclose(actual_flat.float(), naive_scale, atol=1e-4)
 
 

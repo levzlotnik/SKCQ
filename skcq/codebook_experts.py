@@ -190,11 +190,27 @@ class CodebookModule(nn.Module):
     def from_result(
         cls, result: CodebookResult, n_blocks: int, block_size: int, out_dim: int
     ) -> CodebookModule:
-        """Build a CodebookModule from a CodebookResult."""
+        """Build a CodebookModule from a CodebookResult.
+
+        CodebookResult stores assignments as (n_blocks, n_rows) and scales as
+        (n_rows, n_blocks), but CodebookModule expects (num_experts, n_blocks, out_dim).
+        """
+        n_rows = result.scales.shape[0]
+        num_experts = n_rows // out_dim
+
+        # Reshape assignments: (n_blocks, n_rows) -> (n_blocks, num_experts, out_dim) -> (num_experts, n_blocks, out_dim)
+        assigns_3d = []
+        for asgn in result.assignments:
+            a = asgn.reshape(n_blocks, num_experts, out_dim).permute(1, 0, 2).contiguous()
+            assigns_3d.append(a)
+
+        # Reshape scales: (n_rows, n_blocks) -> (num_experts, out_dim, n_blocks) -> (num_experts, n_blocks, out_dim)
+        scales_3d = result.scales.reshape(num_experts, out_dim, n_blocks).permute(0, 2, 1).contiguous()
+
         primary = SphericalCodebook(
             codebook=result.codebooks[0],
-            assignments=result.assignments[0],
-            scales=result.scales,
+            assignments=assigns_3d[0],
+            scales=scales_3d,
             n_blocks=n_blocks,
             block_size=block_size,
             out_dim=out_dim,
@@ -204,7 +220,7 @@ class CodebookModule(nn.Module):
             [
                 AdditiveCodebook(
                     codebook=result.codebooks[c],
-                    assignments=result.assignments[c],
+                    assignments=assigns_3d[c],
                     n_blocks=n_blocks,
                     block_size=block_size,
                     out_dim=out_dim,
