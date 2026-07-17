@@ -355,6 +355,14 @@ def run_one_kmeans(
     return {
         "projection": projection,
         "scheme": label,
+        "block_size": block_size,
+        "K": K,
+        "n_codebooks": n_codebooks,
+        "metric": metric,
+        "shared": shared_codebook,
+        "sign_split": sign_split,
+        "scale_dtype": scale_dtype,
+        "kmeans_iters": max_iters,
         "rel_fro_err": err,
         "bits_per_weight": bpw,
         "compression_ratio": comp_ratio,
@@ -382,6 +390,7 @@ def main() -> None:
         help="Scale quantization dtype: int<Nbits> (e.g. int8, int4), fp16, bf16, fp8_e4m3, fp8_e5m2",
     )
     parser.add_argument("--output", type=str, default=None, help="Output CSV path (default: experiments/weight_quant_error.csv)")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite CSV instead of appending")
     parser.add_argument("--chunk-budget-mb", type=int, default=256, help="Memory budget for k-means chunking (MB)")
     args = parser.parse_args()
 
@@ -444,6 +453,14 @@ def main() -> None:
             all_results.append({
                 "projection": proj_name,
                 "scheme": name,
+                "block_size": 0,
+                "K": 0,
+                "n_codebooks": 0,
+                "metric": "",
+                "shared": False,
+                "sign_split": False,
+                "scale_dtype": "",
+                "kmeans_iters": 0,
                 "rel_fro_err": err,
                 "bits_per_weight": float(bits),
                 "compression_ratio": 16.0 / bits,
@@ -475,14 +492,21 @@ def main() -> None:
     # Sort by bits_per_weight within each projection
     all_results.sort(key=lambda r: (r["projection"], r["bits_per_weight"]))
 
-    # Write CSV
+    # Write CSV (append by default, --overwrite to reset)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["projection", "scheme", "rel_fro_err", "bits_per_weight", "compression_ratio"]
-    with open(output_csv, "w", newline="") as f:
+    fieldnames = [
+        "projection", "scheme", "block_size", "K", "n_codebooks", "metric",
+        "shared", "sign_split", "scale_dtype", "kmeans_iters",
+        "rel_fro_err", "bits_per_weight", "compression_ratio",
+    ]
+    write_header = args.overwrite or not output_csv.exists()
+    mode = "w" if args.overwrite else "a"
+    with open(output_csv, mode, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         writer.writerows(all_results)
-    logger.info("Wrote %d rows to %s", len(all_results), output_csv)
+    logger.info("Wrote %d rows to %s (mode=%s)", len(all_results), output_csv, mode)
 
     # Print table
     print()

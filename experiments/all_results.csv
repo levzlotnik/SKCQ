@@ -1,0 +1,32 @@
+projection,block_size,K,n_codebooks,metric,shared,sign_split,scale_dtype,kmeans_iters,rel_fro_err,bits_per_weight,compression_ratio,notes
+gate,0,0,0,,,,0,0,0.049199,8.00,2.00,int8_per_tensor baseline
+gate,0,0,0,,,,0,0,0.009153,8.00,2.00,int8_per_channel baseline
+gate,0,0,0,,,,0,0,0.806575,4.00,4.00,int4_per_tensor baseline
+gate,0,0,0,,,,0,0,0.158952,4.00,4.00,int4_per_channel baseline
+gate,0,0,0,,,,0,0,0.053431,8.00,2.00,fp8_e4m3 baseline
+gate,0,0,0,,,,0,0,0.053372,8.00,2.00,fp8_e5m2 baseline
+gate,8,8192,1,euclidean,False,False,bf16,100,0.310,4.63,3.46,pre-SSVQ per-block euclidean
+gate,8,8192,1,euclidean,True,False,bf16,100,0.353,3.63,4.41,pre-SSVQ shared euclidean
+gate,8,32768,1,euclidean,True,False,bf16,100,0.298,3.89,4.11,pre-SSVQ shared euclidean
+gate,8,32768,1,cosine,True,False,bf16,100,0.269,3.89,4.11,pre-SSVQ shared cosine
+gate,16,512,2,cosine,False,False,bf16,100,0.510,4.625,3.46,pre-SSVQ residual cb=2 nb=128
+gate,8,32768,1,cosine,True,True,bf16,100,0.125,4.89,3.27,post-SSVQ bf16 scales
+gate,10,32768,1,cosine,True,True,bf16,100,0.175,4.17,3.84,post-SSVQ bf16 scales
+gate,12,32768,1,cosine,True,True,bf16,100,0.216,3.66,4.38,post-SSVQ bf16 scales
+gate,16,32768,1,cosine,True,True,bf16,100,0.282,2.97,5.39,post-SSVQ bf16 scales
+gate,8,32768,1,cosine,True,True,int8,50,0.126633,3.891,4.11,WINNER: beats int4 on both axes
+gate,8,65536,1,cosine,True,True,int8,50,0.114565,4.031,3.97,
+gate,8,16384,1,cosine,True,True,int8,50,0.139463,3.758,4.26,
+gate,8,8192,1,cosine,True,True,int8,50,0.153481,3.629,4.41,
+gate,8,32768,1,cosine,True,True,fp8_e4m3,50,0.128664,3.891,4.11,fp8 scales vs int8
+gate,8,32768,1,cosine,True,True,fp8_e5m2,50,0.136373,3.891,4.11,fp8 scales vs int8
+gate,8,8192,1,cosine,False,True,int8,50,0.141104,4.625,3.46,per-block (not shared)
+gate,6,8192,1,cosine,True,True,int8,50,0.093432,4.514,3.54,smallest error
+gate,7,16384,1,cosine,True,True,int8,50,0.110865,4.173,3.83,
+gate,7,32768,1,cosine,True,True,int8,50,0.099520,4.322,3.70,
+gate,7,32768,1,cosine,True,True,int6,50,0.130776,4.037,3.96,int6 scales
+gate,8,65536,1,cosine,True,True,int6,50,0.134276,3.781,4.23,int6 scales
+gate,9,32768,1,cosine,True,True,int8,50,0.151605,3.604,4.44,
+gate,10,65536,1,cosine,True,True,int8,50,0.162578,3.488,4.59,lowest bpw
+up,16,512,2,cosine,False,False,bf16,100,0.510,4.625,3.46,pre-SSVQ residual cb=2
+down,16,512,2,cosine,False,False,bf16,100,0.093,9.625,1.66,pre-SSVQ residual cb=2
