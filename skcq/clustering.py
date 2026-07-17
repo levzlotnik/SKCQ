@@ -12,7 +12,6 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
-from pt_kmeans import kmeans
 from pydantic import BaseModel, Field
 from tqdm import tqdm
 
@@ -182,6 +181,86 @@ def _sobol_first_orthant(k: int, d: int, device: torch.device) -> torch.Tensor:
     points = points.clamp(min=1e-6)
     # Normalize to unit sphere — all positive → first orthant
     return F.normalize(points, dim=-1)
+
+
+def _sobol_unit_cube(k: int, d: int, device: torch.device) -> torch.Tensor:
+    """Generate k points in [0,1]^d via Sobol sequence (for euclidean k-means init).
+
+    Unlike _sobol_first_orthant (which normalizes to unit sphere), this keeps
+    points in the cube — appropriate for euclidean data that isn't on a sphere.
+    Scales to [-1, 1] to be roughly centered around zero.
+    """
+    sobol = torch.quasirandom.SobolEngine(dimension=d, scramble=True, seed=42)
+    points = sobol.draw(k).to(device)  # (k, d) in [0,1]
+    points = points * 2 - 1  # [-1, 1]
+    return points
+
+
+def _euclidean_kmeans(
+    data: torch.Tensor,
+    k: int,
+    max_iters: int,
+    device: torch.device,
+    name: str,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Standard euclidean (l2) k-means with Sobol init and tqdm progress bar.
+
+    Assignment: argmin ||x_i - centroid_c||^2
+    Update:     centroid_c = mean(x_i for i in c)
+
+    Args:
+        data: (n, d) — raw data on CPU
+    Returns:
+        centroids: (K, d) — on device
+        labels: (n,) — on CPU
+    """
+    n, d = data.shape
+    k_eff = min(k, n)
+
+    # Sobol init in [-1,1]^d — O(k), no data dependency
+    logger.info("[%s] Sobol init (k=%d, d=%d, euclidean)...", name, k_eff, d)
+    centroids = _sobol_unit_cube(k_eff, d, device)  # (k, d)
+
+    pbar = tqdm(range(max_iters), desc=name, leave=False)
+    for it in pbar:
+        # Assign: argmin ||x - c||^2 = argmin(-2*x·c + ||c||^2)
+        labels = _assign_to_centroids_l2(data, centroids.t().contiguous(), chunk_size, device)
+
+        # Update: centroid_c = mean(x_i for i in c)
+        new_centroids = torch.zeros(k_eff, d, dtype=torch.float32, device=device)
+        counts = torch.zeros(k_eff, device=device)
+        for i in range(0, n, chunk_size):
+            end = min(i + chunk_size, n)
+            chunk = data[i:end].to(device)
+            chunk_labels = labels[i:end].to(device)
+            new_centroids.index_add_(0, chunk_labels, chunk)
+            counts.index_add_(0, chunk_labels, torch.ones(end - i, device=device))
+
+        # Handle empty clusters: re-init from Sobol
+        empty = counts == 0
+        n_empty = empty.sum().item()
+        if n_empty > 0:
+            new_centroids[empty] = _sobol_unit_cube(n_empty, d, device)
+        else:
+            new_centroids = new_centroids / counts.unsqueeze(-1)
+
+        # Check convergence
+        moved = (new_centroids - centroids).norm().item()
+        centroids = new_centroids
+
+        pbar.set_postfix(moved=f"{moved:.6f}", empty=n_empty)
+
+        if moved < 1e-6:
+            logger.info("[%s] converged at iter %d (moved=%.6f)", name, it, moved)
+            break
+    pbar.close()
+
+    # Final assignment
+    labels = _assign_to_centroids_l2(data, centroids.t().contiguous(), chunk_size, device)
+
+    logger.info("[%s] k-means done after %d iters", name, it + 1)
+    return centroids, labels.cpu()  # (K, d), (n,)
 
 
 def _norm_weighted_spherical_kmeans(
@@ -393,20 +472,17 @@ def _cluster_block(
         labels_full[~block_zero] = labels_nz.to(block_data.device)
         scales_full[~block_zero] = scales_nz
     else:  # euclidean (l2): centroids are the direct reconstruction, no scale
-        codebook_kmeans, _ = kmeans(
+        centroids_kbd, labels_nz = _euclidean_kmeans(
             train_data,
-            n_clusters=k_eff,
+            k=k_eff,
             max_iters=max_iters,
-            distance_metric="l2",
-            init_method="kmeans++",
-            x_pre_normalized=False,
             device=device,
+            name=name,
             chunk_size=train_chunk_size,
         )
-        centroids_kbd = codebook_kmeans.to(block_data.device)
 
         # Re-assign ALL points to the learned centroids (l2: argmin distance)
-        labels_nz = _assign_to_centroids_l2(non_zero, centroids_kbd, chunk_size, device)
+        labels_nz = _assign_to_centroids_l2(non_zero, centroids_kbd.t().contiguous(), chunk_size, device)
         labels_full = torch.zeros(n_rows, dtype=torch.long, device=block_data.device)
         labels_full[~block_zero] = labels_nz
         scales_full = torch.zeros(n_rows, dtype=torch.float32, device=block_data.device)
@@ -509,7 +585,7 @@ def build_codebook(
 
     for c in range(n_codebooks):
         k_c = k_per_codebook[c]
-        metric: DistanceMetric = distance_metric
+        metric: DistanceMetric = distance_metric if c == 0 else "euclidean"
 
         if shared_codebook:
             # Pool all blocks' sub-vectors into one (n_rows * n_blocks, block_size) tensor
