@@ -1,7 +1,7 @@
 [project]
 name = "skcq"
 version = "0.1.0"
-requires-python = "==3.14"
+requires-python = ">=3.14"
 dependencies = [
     "ray[default,client]>=2.55",
     "pt-kmeans>=0.9",
@@ -25,6 +25,9 @@ ignore = ["N812", "TC001", "TC002", "TC003"]
 [tool.mypy]
 python_version = "3.14"
 ignore_missing_imports = true
+
+[tool.setuptools.packages.find]
+include = ["skcq*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -1,0 +1,8 @@
+projection,scheme,rel_fro_err,bits_per_weight,compression_ratio
+gate,int4_per_tensor,0.8065752639361287,4.0,4.0
+gate,int4_per_channel,0.15895160716036008,4.0,4.0
+gate,kmeans_bs10_K32768_cb1_cos_shared_ssvq,0.1754176887130253,4.166015625,3.840600093764651
+gate,int8_per_tensor,0.049199274535836154,8.0,2.0
+gate,int8_per_channel,0.009153075158905816,8.0,2.0
+gate,fp8_e4m3,0.05343104458387133,8.0,2.0
+gate,fp8_e5m2,0.053371576920922224,8.0,2.0
