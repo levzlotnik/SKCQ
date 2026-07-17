@@ -9,7 +9,7 @@ defaults:
   max_iters: 100
   norm_threshold: 0.001
   skip_zeros: true
-  k_residual_mult: 0.5
+  k_residual_mult: 2.0
 layer_overrides:
   '0':
     k_gate: null

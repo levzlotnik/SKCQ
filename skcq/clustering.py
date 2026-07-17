@@ -43,7 +43,7 @@ class CodebookParams(BaseModel):
     )
     k_residual_mult: float = Field(
         default=1.0,
-        description="K multiplier for residual codebooks. K_c = K_0 * k_residual_mult^c",
+        description="K_0/K_r ratio: primary codebook size divided by residual codebook size. K_c = K_0 / k_residual_mult^c (e.g. 32 means K_r = K/32)",
     )
     chunk_budget_mb: int = Field(
         default=2048,
@@ -455,7 +455,7 @@ def build_codebook(
 
     Args:
         rows: (num_experts * out_dim, in_dim) — weight rows, expert-major
-        k: base codebook size (K_0); K_c = K_0 * k_residual_mult^c
+        k: base codebook size (K_0); K_c = K_0 / k_residual_mult^c
         n_blocks: number of input-dim sub-blocks (PQ)
         n_codebooks: number of codebooks (1 = no residual, 2+ = primary + residuals)
         num_experts, out_dim: for reshaping assignments/scales
@@ -495,7 +495,7 @@ def build_codebook(
     else:
         signs = None
 
-    k_per_codebook = [max(1, int(k * params.k_residual_mult**c)) for c in range(n_codebooks)]
+    k_per_codebook = [max(1, int(k / params.k_residual_mult**c)) for c in range(n_codebooks)]
 
     cb_codebooks: list[torch.Tensor] = []
     cb_assignments: list[torch.Tensor] = []

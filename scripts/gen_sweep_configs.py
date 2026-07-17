@@ -71,8 +71,8 @@ def compression_ratio(
     num_experts: int,
 ) -> float:
     """Total quantized bits / total original bits for one layer's MoE."""
-    k_list_gu = [max(1, int(k_gu * k_residual_mult**c)) for c in range(n_codebooks)]
-    k_list_dn = [max(1, int(k_dn * k_residual_mult**c)) for c in range(n_codebooks)]
+    k_list_gu = [max(1, int(k_gu / k_residual_mult**c)) for c in range(n_codebooks)]
+    k_list_dn = [max(1, int(k_dn / k_residual_mult**c)) for c in range(n_codebooks)]
     # gate + up (in=hidden, out=intermediate), down (in=intermediate, out=hidden)
     orig = 2 * original_bits(hidden_size, intermediate_size, num_experts) + original_bits(
         intermediate_size, hidden_size, num_experts
@@ -170,7 +170,7 @@ def main() -> None:
     r_list = [8, 16, 32, 64, 128, 256]
     n_blocks_list = [1, 2, 4, 8, 16]
     n_codebooks_list = [1, 2, 3]
-    k_residual_mult = 0.5
+    k_residual_mult = 2.0  # K_0/K_r ratio (was 0.5 = multiply, now 2.0 = divide)
 
     n_gu = num_experts * intermediate_size  # total rows clustered per gate/up codebook
     n_dn = num_experts * hidden_size  # total rows clustered per down codebook

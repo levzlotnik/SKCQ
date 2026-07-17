@@ -280,7 +280,7 @@ def run_one_kmeans(
     n_blocks = in_dim // block_size
     quant_dim = n_blocks * block_size
     remainder_dim = in_dim - quant_dim
-    k_per_codebook = [max(1, int(K * k_residual_mult ** c)) for c in range(n_codebooks)]
+    k_per_codebook = [max(1, int(K / k_residual_mult ** c)) for c in range(n_codebooks)]
 
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
@@ -383,7 +383,7 @@ def main() -> None:
     parser.add_argument("--metric", choices=["cosine", "euclidean"], default="cosine", help="Distance metric (cosine=spherical, euclidean=l2)")
     parser.add_argument("--shared", action="store_true", help="Use a single shared codebook across all blocks")
     parser.add_argument("--sign-split", action="store_true", help="Extract signs, cluster on first orthant (SSVQ)")
-    parser.add_argument("--krm", type=float, default=1.0, help="k_residual_mult: K_c = K * krm^c")
+    parser.add_argument("--krm", type=float, default=1.0, help="K_0/K_r ratio: primary codebook size divided by residual codebook size (e.g. 32 means K_r = K/32). Default 1.0 = equal sizes")
     parser.add_argument("--kmeans-iters", type=int, default=100, help="Max k-means iterations")
     parser.add_argument(
         "--scale-dtype", type=str, default="bf16",

@@ -169,7 +169,7 @@ class RocmClient:
         rows_cpu = rows.cpu().contiguous()
         block_size = rows_cpu.shape[1] // n_blocks
 
-        k_list = [max(1, int(k * params.k_residual_mult**c)) for c in range(n_codebooks)]
+        k_list = [max(1, int(k / params.k_residual_mult**c)) for c in range(n_codebooks)]
         cb_shapes = [(n_blocks, block_size, k_c) for k_c in k_list]
         asgn_shape = (num_experts, n_blocks, out_dim)
         scales_shape = (num_experts, n_blocks, out_dim)

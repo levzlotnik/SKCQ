@@ -325,7 +325,7 @@ class TestBuildCodebook:
 
     def test_asymmetric_k(self) -> None:
         rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.1
-        params = self._params(n_codebooks=2, k_residual_mult=0.5)
+        params = self._params(n_codebooks=2, k_residual_mult=2.0)
         result = build_codebook(
             rows,
             params,
@@ -338,10 +338,10 @@ class TestBuildCodebook:
             name="asym",
         )
         assert result.codebooks[0].shape[-1] == K
-        assert result.codebooks[1].shape[-1] == int(K * 0.5)
-        # assignments per codebook sized to its own K
-        assert result.assignments[0].shape[-1] == OUT_DIM
-        assert result.assignments[1].shape[-1] == OUT_DIM
+        assert result.codebooks[1].shape[-1] == int(K / 2)
+        # assignments per codebook sized to (n_blocks, n_rows)
+        assert result.assignments[0].shape == (N_BLOCKS, NUM_EXPERTS * OUT_DIM)
+        assert result.assignments[1].shape == (N_BLOCKS, NUM_EXPERTS * OUT_DIM)
 
     def test_single_scale(self) -> None:
         """Only cb0 has scales — CodebookResult.scales is a single tensor, not per-codebook."""
