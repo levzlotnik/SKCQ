@@ -134,6 +134,74 @@ INTEGER_SCHEMES = [
 
 
 # ---------------------------------------------------------------------------
+# Scale dtype parsing and quantization
+# ---------------------------------------------------------------------------
+# Supported formats:
+#   int<Nbits>  — symmetric per-tensor integer quantization (e.g. int4, int8)
+#   fp16        — torch.float16
+#   bf16        — torch.bfloat16  (default)
+#   fp8_e4m3    — torch.float8_e4m3fn
+#   fp8_e5m2    — torch.float8_e5m2
+
+_FP8_MAP = {
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+}
+
+
+def parse_scale_dtype(s: str) -> str:
+    """Validate and normalise a scale-dtype string."""
+    s = s.strip().lower()
+    if s.startswith("int"):
+        bits = int(s[3:])
+        if bits < 2 or bits > 16:
+            raise ValueError(f"int bits must be 2-16, got {bits}")
+        return s
+    if s in ("fp16", "bf16"):
+        return s
+    if s in _FP8_MAP:
+        return s
+    raise ValueError(
+        f"Unknown scale dtype '{s}'. Expected: int<Nbits>, fp16, bf16, fp8_e4m3, fp8_e5m2"
+    )
+
+
+def scale_bits_per_elem(dtype: str) -> int:
+    """Bits per scale element for the given dtype."""
+    if dtype.startswith("int"):
+        return int(dtype[3:])
+    if dtype in _FP8_MAP:
+        return 8
+    if dtype in ("fp16", "bf16"):
+        return 16
+    raise ValueError(f"Unknown scale dtype: {dtype}")
+
+
+def quantize_scales(scales: torch.Tensor, dtype: str) -> torch.Tensor:
+    """Quantize-and-dequantize scales to the target dtype, returning float32.
+
+    For integer dtypes: per-tensor symmetric quantization. The single global
+    fp32 scale factor is negligible (one float per (n_rows, n_blocks) tensor).
+    """
+    if dtype == "bf16":
+        return scales.to(torch.bfloat16).to(torch.float32)
+    if dtype == "fp16":
+        return scales.to(torch.float16).to(torch.float32)
+    if dtype in _FP8_MAP:
+        return scales.to(_FP8_MAP[dtype]).to(torch.float32)
+    if dtype.startswith("int"):
+        bits = int(dtype[3:])
+        levels = 2 ** (bits - 1) - 1  # symmetric: -levels..+levels
+        abs_max = scales.abs().max()
+        if abs_max == 0:
+            return scales.clone()
+        q_scale = abs_max / levels
+        q = torch.round(scales / q_scale).clamp(-levels, levels)
+        return (q * q_scale).to(torch.float32)
+    raise ValueError(f"Unknown scale dtype: {dtype}")
+
+
+# ---------------------------------------------------------------------------
 # Spherical k-means reconstruction
 # ---------------------------------------------------------------------------
 def reconstruct_from_codebook(result, n_rows: int, n_blocks: int, block_size: int):
@@ -162,6 +230,7 @@ def bits_per_weight_kmeans(
     n_codebooks: int, k_per_codebook: list[int],
     shared_codebook: bool = False,
     sign_split: bool = False,
+    scale_bits_per_elem: int = 16,
 ) -> float:
     """Compute effective bits per weight for k-means quantization."""
     n_cb = 1 if shared_codebook else n_blocks
@@ -172,7 +241,7 @@ def bits_per_weight_kmeans(
             assign_bits += n_rows * n_blocks * 1
         else:
             assign_bits += n_rows * n_blocks * math.ceil(math.log2(K_c))
-    scale_bits = n_rows * n_blocks * 16
+    scale_bits = n_rows * n_blocks * scale_bits_per_elem
     sign_bits = n_rows * n_blocks * block_size if sign_split else 0  # 1 bit per element
     total_bits = codebook_bits + assign_bits + scale_bits + sign_bits
     total_weights = n_rows * in_dim
@@ -197,6 +266,7 @@ def run_one_kmeans(
     shared_codebook: bool = False,
     sign_split: bool = False,
     max_iters: int = 100,
+    scale_dtype: str = "bf16",
     layer_idx: int = 24,
     device: torch.device | None = None,
     chunk_budget_mb: int = 256,
@@ -214,7 +284,7 @@ def run_one_kmeans(
 
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
-    label = f"kmeans_bs{block_size}_K{K}_cb{n_codebooks}_{metric[:3]}_{shared_tag}_{ssvq_tag}"
+    label = f"kmeans_bs{block_size}_K{K}_cb{n_codebooks}_{metric[:3]}_{shared_tag}_{ssvq_tag}_{scale_dtype}"
     logger.info(
         "[%s] %s (n_blocks=%d, remainder=%d, K=%d, cb=%d, metric=%s, krm=%.1f, shared=%s)",
         projection, label, n_blocks, remainder_dim, K, n_codebooks, metric, k_residual_mult, shared_codebook,
@@ -251,6 +321,11 @@ def run_one_kmeans(
         sign_split=sign_split,
     )
 
+    # Quantize scales (full-precision fp32 → target dtype → dequantized fp32)
+    sc_bits = scale_bits_per_elem(scale_dtype)
+    result.scales = quantize_scales(result.scales, scale_dtype)
+    logger.info("  [%s] scale quantized to %s (%d bits/elem)", projection, scale_dtype, sc_bits)
+
     W_recon_quant = reconstruct_from_codebook(result, n_rows, n_blocks, block_size)
     if W_remainder is not None:
         W_recon = torch.cat([W_recon_quant, W_remainder.float()], dim=1)
@@ -259,7 +334,11 @@ def run_one_kmeans(
 
     err = torch.norm(W_raw.float() - W_recon).item() / W_norm
 
-    bpw_quant = bits_per_weight_kmeans(n_rows, quant_dim, n_blocks, block_size, n_codebooks, k_per_codebook, shared_codebook=shared_codebook, sign_split=sign_split)
+    bpw_quant = bits_per_weight_kmeans(
+        n_rows, quant_dim, n_blocks, block_size, n_codebooks, k_per_codebook,
+        shared_codebook=shared_codebook, sign_split=sign_split,
+        scale_bits_per_elem=sc_bits,
+    )
     if remainder_dim > 0:
         total_bits = bpw_quant * n_rows * quant_dim + 16 * n_rows * remainder_dim
         bpw = total_bits / (n_rows * in_dim)
@@ -298,9 +377,17 @@ def main() -> None:
     parser.add_argument("--sign-split", action="store_true", help="Extract signs, cluster on first orthant (SSVQ)")
     parser.add_argument("--krm", type=float, default=1.0, help="k_residual_mult: K_c = K * krm^c")
     parser.add_argument("--kmeans-iters", type=int, default=100, help="Max k-means iterations")
+    parser.add_argument(
+        "--scale-dtype", type=str, default="bf16",
+        help="Scale quantization dtype: int<Nbits> (e.g. int8, int4), fp16, bf16, fp8_e4m3, fp8_e5m2",
+    )
     parser.add_argument("--output", type=str, default=None, help="Output CSV path (default: experiments/weight_quant_error.csv)")
     parser.add_argument("--chunk-budget-mb", type=int, default=256, help="Memory budget for k-means chunking (MB)")
     args = parser.parse_args()
+
+    # Validate scale dtype
+    args.scale_dtype = parse_scale_dtype(args.scale_dtype)
+    logger.info("Scale dtype: %s (%d bits/elem)", args.scale_dtype, scale_bits_per_elem(args.scale_dtype))
 
     # Resolve output path
     if args.output:
@@ -377,6 +464,7 @@ def main() -> None:
             shared_codebook=args.shared,
             sign_split=args.sign_split,
             max_iters=args.kmeans_iters,
+            scale_dtype=args.scale_dtype,
             layer_idx=args.layer,
             device=device,
             chunk_budget_mb=args.chunk_budget_mb,
