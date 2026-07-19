@@ -222,7 +222,7 @@ def _euclidean_kmeans(
     logger.info("[%s] Sobol init (k=%d, d=%d, euclidean)...", name, k_eff, d)
     centroids = _sobol_unit_cube(k_eff, d, device)  # (k, d)
 
-    pbar = tqdm(range(max_iters), desc=name, leave=False)
+    pbar = tqdm(range(max_iters), desc=name, leave=True)
     for it in pbar:
         # Assign: argmin ||x - c||^2 = argmin(-2*x·c + ||c||^2)
         labels = _assign_to_centroids_l2(data, centroids.t().contiguous(), chunk_size, device)
@@ -297,7 +297,7 @@ def _norm_weighted_spherical_kmeans(
     centroids = _sobol_first_orthant(k_eff, d, device)  # (k, d)
     centroids_t = centroids.t().contiguous()  # (d, k)
 
-    pbar = tqdm(range(max_iters), desc=name, leave=False)
+    pbar = tqdm(range(max_iters), desc=name, leave=True)
     for it in pbar:
         # Assign: argmax(unit_i · centroid_c)
         labels = _assign_to_centroids(unit_data, centroids_t, chunk_size, device)
