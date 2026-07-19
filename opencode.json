@@ -9,11 +9,26 @@
   "mcp": {
     "lean-lsp": {
       "type": "local",
-      "command": ["uvx", "lean-lsp-mcp"],
-      "env": {
+      "command": ["uvx", "lean-lsp-mcp", "--loogle-local"],
+      "environment": {
         "LEAN_PROJECT_PATH": "/home/levzlotnik/Projects/SKCQ/some_math",
         "LEAN_LOG_LEVEL": "INFO"
       }
+    },
+    "arxiv": {
+      "type": "local",
+      "command": [
+        "docker",
+        "run",
+        "-i",
+        "--rm",
+        "-v",
+        "/home/levzlotnik/Papers:/papers",
+        "arxiv-mcp-server:latest",
+        "--storage-path",
+        "/papers"
+      ],
+      "enabled": true
     }
   },
   "skills": {

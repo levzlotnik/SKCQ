@@ -328,13 +328,13 @@ def run_one_kmeans(
     K: int,
     n_codebooks: int,
     metric: str,
-    k_residual_mult: float = 1.0,
     shared_codebook: bool = False,
     sign_split: bool = False,
     max_iters: int = 100,
     scale_dtype: str = "bf16",
     residual_block_size: int | None = None,
     codebook_bits: int = 16,
+    residual_k: int | None = None,
     layer_idx: int = 24,
     device: torch.device | None = None,
     chunk_budget_mb: int = 256,
@@ -348,7 +348,7 @@ def run_one_kmeans(
     n_blocks = in_dim // block_size
     quant_dim = n_blocks * block_size
     remainder_dim = in_dim - quant_dim
-    k_per_codebook = [max(1, int(K / k_residual_mult ** c)) for c in range(n_codebooks)]
+    k_per_codebook = [K if c == 0 else (residual_k or K) for c in range(n_codebooks)]
 
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
@@ -356,8 +356,8 @@ def run_one_kmeans(
     cb_tag = f"_cb{codebook_bits}" if codebook_bits < 16 else ""
     label = f"kmeans_bs{block_size}_K{K}_cb{n_codebooks}_{metric[:3]}_{shared_tag}_{ssvq_tag}_{scale_dtype}{rbs_tag}{cb_tag}"
     logger.info(
-        "[%s] %s (n_blocks=%d, remainder=%d, K=%d, cb=%d, metric=%s, krm=%.1f, shared=%s)",
-        projection, label, n_blocks, remainder_dim, K, n_codebooks, metric, k_residual_mult, shared_codebook,
+        "[%s] %s (n_blocks=%d, remainder=%d, K=%d, K_r=%s, cb=%d, metric=%s, shared=%s)",
+        projection, label, n_blocks, remainder_dim, K, residual_k, n_codebooks, metric, shared_codebook,
     )
 
     out_dim = intermediate_size if projection != "down" else hidden_size
@@ -366,7 +366,7 @@ def run_one_kmeans(
         k_gate=K, k_up=K, k_down=K,
         n_blocks_gate_up=n_blocks, n_blocks_down=n_blocks,
         n_codebooks=n_codebooks,
-        k_residual_mult=k_residual_mult,
+        residual_k=residual_k,
         max_iters=max_iters,
         norm_threshold=0.001,
         skip_zeros=True,
@@ -458,7 +458,7 @@ def main() -> None:
     parser.add_argument("--metric", choices=["cosine", "euclidean"], default="cosine", help="Distance metric (cosine=spherical, euclidean=l2)")
     parser.add_argument("--shared", action="store_true", help="Use a single shared codebook across all blocks")
     parser.add_argument("--sign-split", action="store_true", help="Extract signs, cluster on first orthant (SSVQ)")
-    parser.add_argument("--krm", type=float, default=1.0, help="K_0/K_r ratio: primary codebook size divided by residual codebook size (e.g. 32 means K_r = K/32). Default 1.0 = equal sizes")
+    parser.add_argument("--residual-k", type=int, default=None, help="K for residual codebooks (c>=1). Default: same as primary K")
     parser.add_argument("--residual-block-size", type=int, default=None, help="Block size for residual codebooks (must divide --block-size). Default: same as primary")
     parser.add_argument("--codebook-bits", type=int, default=16, help="Bits per codebook element (16=fp16, 8=int8). Per-centroid scale absorbed into row_scale")
     parser.add_argument("--kmeans-iters", type=int, default=100, help="Max k-means iterations")
@@ -555,7 +555,7 @@ def main() -> None:
             K=args.K,
             n_codebooks=args.n_codebooks,
             metric=args.metric,
-            k_residual_mult=args.krm,
+            residual_k=args.residual_k,
             shared_codebook=args.shared,
             sign_split=args.sign_split,
             max_iters=args.kmeans_iters,

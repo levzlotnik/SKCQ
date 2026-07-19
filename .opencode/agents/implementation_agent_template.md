@@ -3,7 +3,7 @@ description: Implementation agent that writes and edits code to complete the req
 mode: subagent
 model: FILL_MODEL
 permission:
-  edit: ask
+  edit: allow
   bash:
     "*": ask
     "git status": allow
@@ -17,6 +17,10 @@ permission:
     "head *": allow
     "tail *": allow
     "find *": allow
+    "sort": allow
+    "sort *": allow
+    "grep": allow
+    "grep *": allow
     "less *": allow
     "wc *": allow
     "tree *": allow

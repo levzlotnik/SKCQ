@@ -113,7 +113,7 @@ class WorkerActor:
             layer: layer index
             params: CodebookParams kwargs (k_gate, k_up, k_down, n_blocks_gate_up,
                     n_blocks_down, n_codebooks, max_iters, norm_threshold, skip_zeros,
-                    k_residual_mult)
+                    residual_k)
             num_experts: number of MoE experts
             hidden_size: model hidden dimension
             intermediate_size: MoE intermediate dimension

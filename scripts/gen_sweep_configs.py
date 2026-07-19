@@ -65,14 +65,14 @@ def compression_ratio(
     k_dn: int,
     n_blocks: int,
     n_codebooks: int,
-    k_residual_mult: float,
+    residual_k: int | None,
     hidden_size: int,
     intermediate_size: int,
     num_experts: int,
 ) -> float:
     """Total quantized bits / total original bits for one layer's MoE."""
-    k_list_gu = [max(1, int(k_gu / k_residual_mult**c)) for c in range(n_codebooks)]
-    k_list_dn = [max(1, int(k_dn / k_residual_mult**c)) for c in range(n_codebooks)]
+    k_list_gu = [k_gu if c == 0 else (residual_k or k_gu) for c in range(n_codebooks)]
+    k_list_dn = [k_dn if c == 0 else (residual_k or k_dn) for c in range(n_codebooks)]
     # gate + up (in=hidden, out=intermediate), down (in=intermediate, out=hidden)
     orig = 2 * original_bits(hidden_size, intermediate_size, num_experts) + original_bits(
         intermediate_size, hidden_size, num_experts
@@ -88,7 +88,7 @@ def gen_config(
     r: int,
     n_blocks: int,
     n_codebooks: int,
-    k_residual_mult: float,
+    residual_k: int | None,
     hidden_size: int,
     intermediate_size: int,
     num_experts: int,
@@ -111,7 +111,7 @@ def gen_config(
             n_blocks_gate_up=n_blocks,
             n_blocks_down=n_blocks,
             n_codebooks=n_codebooks,
-            k_residual_mult=k_residual_mult,
+            residual_k=residual_k,
             max_iters=100,
             norm_threshold=0.001,
             skip_zeros=True,
@@ -127,7 +127,7 @@ def gen_config(
         "r": r,
         "n_blocks": n_blocks,
         "n_codebooks": n_codebooks,
-        "k_residual_mult": k_residual_mult,
+        "residual_k": residual_k,
         "bs_gu": bs_gu,
         "bs_dn": bs_dn,
         "k_gu": k_gu,
@@ -170,7 +170,7 @@ def main() -> None:
     r_list = [8, 16, 32, 64, 128, 256]
     n_blocks_list = [1, 2, 4, 8, 16]
     n_codebooks_list = [1, 2, 3]
-    k_residual_mult = 2.0  # K_0/K_r ratio (was 0.5 = multiply, now 2.0 = divide)
+    residual_k = 256  # absolute K for residual codebooks (c>=1)
 
     n_gu = num_experts * intermediate_size  # total rows clustered per gate/up codebook
     n_dn = num_experts * hidden_size  # total rows clustered per down codebook
@@ -194,7 +194,7 @@ def main() -> None:
                     r,
                     nb,
                     n_cb,
-                    k_residual_mult,
+                    residual_k,
                     hidden_size,
                     intermediate_size,
                     num_experts,
@@ -205,7 +205,7 @@ def main() -> None:
                     info["k_dn"],
                     nb,
                     n_cb,
-                    k_residual_mult,
+                    residual_k,
                     hidden_size,
                     intermediate_size,
                     num_experts,
@@ -224,7 +224,7 @@ def main() -> None:
     # Print table
     print(
         f"{'label':28} {'r':>4} {'N_gu/K_gu':>9} {'N_dn/K_dn':>9} {'K_gu':>6} {'bs_gu':>5} "
-        f"{'K_dn':>6} {'bs_dn':>5} {'n_cb':>4} {'krm':>5} {'compress':>9}"
+        f"{'K_dn':>6} {'bs_dn':>5} {'n_cb':>4} {'res_k':>6} {'compress':>9}"
     )
     print("-" * 106)
     for r_info in rows:
@@ -234,7 +234,7 @@ def main() -> None:
             f"{r_info['label']:28} {r_info['r']:>4} {n_over_k_gu:>9.1f} {n_over_k_dn:>9.1f} "
             f"{r_info['k_gu']:>6} {r_info['bs_gu']:>5} "
             f"{r_info['k_dn']:>6} {r_info['bs_dn']:>5} "
-            f"{r_info['n_codebooks']:>4} {r_info['k_residual_mult']:>5.2f} "
+            f"{r_info['n_codebooks']:>4} {r_info['residual_k']:>6} "
             f"{r_info['compression']:>8.1f}x"
         )
 

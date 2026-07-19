@@ -3,7 +3,7 @@ description: Implementation agent that writes and edits code to complete the req
 mode: subagent
 model: serval/Ornith-1.0-9B
 permission:
-  edit: ask
+  edit: allow
   bash:
     "*": ask
     "git status": allow
@@ -15,6 +15,32 @@ permission:
     "ls *": allow
     "cat *": allow
     "head *": allow
+    "tail *": allow
+    "find *": allow
+    "sort": allow
+    "sort *": allow
+    "grep": allow
+    "grep *": allow
+    "less *": allow
+    "wc *": allow
+    "tree *": allow
+    "tree": allow
+    "du *": allow
+    "df *": allow
+    "file *": allow
+    "stat *": allow
+    "which *": allow
+    "whereis *": allow
+    "pwd": allow
+    "env": allow
+    "printenv": allow
+    "printenv *": allow
+    "uname": allow
+    "uname *": allow
+    "whoami": allow
+    "id": allow
+    "date": allow
+    "ps *": allow
     "rg *": allow
     "uv run ruff check *": allow
     "uv run ruff format *": allow

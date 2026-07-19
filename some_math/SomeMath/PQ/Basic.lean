@@ -26,7 +26,9 @@ theorem pq_frobenius_decomposition
     (π : Fin M → Fin B → Fin K) :
     pqErrorSquared W C π =
     ∑ b : Fin B, ∑ i : Fin M, ∑ j : Fin N, (W i b j - C b (π i b) j) ^ 2 := by
-  sorry
+  simp [pqReconstruct, pqErrorSquared]
+  rw [Finset.sum_comm]
+  rfl
 
 /-- **Theorem 2 (Optimal assignment bound).**
 For fixed codebooks, the optimal per-row assignment minimizes each block term independently.
@@ -38,4 +40,8 @@ theorem pq_optimal_assignment_bound
     (π : Fin M → Fin B → Fin K) :
     pqErrorSquared W C π ≥
     ∑ i : Fin M, ∑ b : Fin B, ⨅ k : Fin K, ∑ j : Fin N, (W i b j - C b k j) ^ 2 := by
-  sorry
+  simp [pqReconstruct, pqErrorSquared]
+  refine Finset.sum_le_sum fun i _ => Finset.sum_le_sum fun b _ => ?_
+  refine le_ciInf ?_ (Finset.mem_univ _)
+  intro k _
+  exact Finset.single_le_sum (fun j _ => sq_nonneg _) (Finset.mem_univ k)

@@ -326,7 +326,7 @@ class TestBuildCodebook:
 
     def test_asymmetric_k(self) -> None:
         rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.1
-        params = self._params(n_codebooks=2, k_residual_mult=2.0)
+        params = self._params(n_codebooks=2, residual_k=8)
         result = build_codebook(
             rows,
             params,
@@ -339,7 +339,7 @@ class TestBuildCodebook:
             name="asym",
         )
         assert result.codebooks[0].shape[-1] == K
-        assert result.codebooks[1].shape[-1] == int(K / 2)
+        assert result.codebooks[1].shape[-1] == 8  # residual_k=8
         # assignments per codebook sized to (n_blocks, n_rows)
         assert result.assignments[0].shape == (N_BLOCKS, NUM_EXPERTS * OUT_DIM)
         assert result.assignments[1].shape == (N_BLOCKS, NUM_EXPERTS * OUT_DIM)

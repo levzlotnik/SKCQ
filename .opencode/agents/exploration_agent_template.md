@@ -17,6 +17,10 @@ permission:
     "head *": allow
     "tail *": allow
     "find *": allow
+    "sort": allow
+    "sort *": allow
+    "grep": allow
+    "grep *": allow
     "less *": allow
     "wc *": allow
     "tree *": allow

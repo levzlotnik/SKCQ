@@ -11,7 +11,7 @@ KLD_TOKENS="${2:-2048}"
 
 # Tier 1 config in run order
 configs=(
-    "kbs16_nb4_cb2"    # asymmetric K (k_residual_mult=0.5), 4 blocks, 2 codebooks
+    "kbs16_nb4_cb2"    # asymmetric K (residual_k=256), 4 blocks, 2 codebooks
 )
 
 total=${#configs[@]}

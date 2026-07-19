@@ -15,4 +15,4 @@ theorem bits_per_weight
     let block_dim := (D : ℝ) / B
     let bpw := codebook_bits / block_dim + scale_bits / D
     bpw = (∑ c : Fin C, Real.logb 2 (K c)) / ((D : ℝ) / B) + scale_bits / D := by
-  sorry
+  rfl

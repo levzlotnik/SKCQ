@@ -9,7 +9,7 @@ defaults:
   max_iters: 100
   norm_threshold: 0.001
   skip_zeros: true
-  k_residual_mult: 2.0
+  residual_k: 256
 layer_overrides:
   '0':
     k_gate: null
@@ -21,6 +21,6 @@ layer_overrides:
     max_iters: null
     norm_threshold: 0.001
     skip_zeros: true
-    k_residual_mult: null
+    residual_k: null
 eval_samples: 100
 output_dir: codebooks_kbs256_nb16_cb3

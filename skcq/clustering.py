@@ -40,9 +40,9 @@ class CodebookParams(BaseModel):
         default=True,
         description="Whether to exclude near-zero rows from codebook building",
     )
-    k_residual_mult: float = Field(
-        default=1.0,
-        description="K_0/K_r ratio: primary codebook size divided by residual codebook size. K_c = K_0 / k_residual_mult^c (e.g. 32 means K_r = K/32)",
+    residual_k: int | None = Field(
+        default=None,
+        description="K for residual codebooks (c>=1). If None, same as primary K.",
     )
     chunk_budget_mb: int = Field(
         default=2048,
@@ -62,7 +62,7 @@ class LayerOverride(BaseModel):
     max_iters: int | None = None
     norm_threshold: float | None = None
     skip_zeros: bool | None = None
-    k_residual_mult: float | None = None
+    residual_k: int | None = None
     chunk_budget_mb: int | None = None
 
 
@@ -586,7 +586,7 @@ def build_codebook(
 
     Args:
         rows: (num_experts * out_dim, in_dim) — weight rows, expert-major
-        k: base codebook size (K_0); K_c = K_0 / k_residual_mult^c
+        k: base codebook size (K_0); K_c = residual_k for c>=1 (or K if residual_k is None)
         n_blocks: number of input-dim sub-blocks (PQ) for PRIMARY codebook
         n_codebooks: number of codebooks (1 = no residual, 2+ = primary + residuals)
         num_experts, out_dim: for reshaping assignments/scales
@@ -642,7 +642,7 @@ def build_codebook(
     else:
         signs = None
 
-    k_per_codebook = [max(1, int(k / params.k_residual_mult**c)) for c in range(n_codebooks)]
+    k_per_codebook = [k if c == 0 else (params.residual_k or k) for c in range(n_codebooks)]
 
     cb_codebooks: list[torch.Tensor] = []
     cb_assignments: list[torch.Tensor] = []

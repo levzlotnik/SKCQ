@@ -3,7 +3,7 @@ description: Implementation agent for Lean 4 code — formal proofs, tactics, an
 mode: subagent
 model: FILL_MODEL
 permission:
-  edit: ask
+  edit: allow
   lsp: allow
   "lean-lsp_*": allow
   bash:
@@ -19,6 +19,10 @@ permission:
     "head *": allow
     "tail *": allow
     "find *": allow
+    "sort": allow
+    "sort *": allow
+    "grep": allow
+    "grep *": allow
     "less *": allow
     "wc *": allow
     "tree *": allow

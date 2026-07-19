@@ -22,8 +22,8 @@ fi
 MODEL_ID="$1"
 AGENT_TYPE="${2:-implementation}"
 
-if [[ ! "$MODEL_ID" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-  echo "Error: model id must be of the form '<provider>/<model>' (got: '$MODEL_ID')" >&2
+if [[ ! "$MODEL_ID" =~ ^[A-Za-z0-9_.:-]+(/[A-Za-z0-9_.:-]+)+$ ]]; then
+  echo "Error: model id must be of the form '<provider>/<model>[/<...>]' (got: '$MODEL_ID')" >&2
   exit 2
 fi
 
