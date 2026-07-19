@@ -91,50 +91,87 @@ def extract_layer_rows(model_id: str, layer_idx: int, hidden_size: int, intermed
 # ---------------------------------------------------------------------------
 # Integer baseline quantization
 # ---------------------------------------------------------------------------
-def quant_intN_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
+def quant_intN_symmetric_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
+    """Symmetric integer quantization: range [-2^(b-1)+1, 2^(b-1)-1], wastes 1 code.
+
+    For bits>=4 this is standard and near-optimal. For bits=2 it gives only 3 levels.
+    """
     levels = 2 ** (bits - 1) - 1
     scale = W.abs().max() / levels
     q = torch.round(W / scale).clamp(-levels, levels)
     return q * scale
 
 
-def quant_intN_per_channel(W: torch.Tensor, bits: int) -> torch.Tensor:
+def quant_intN_symmetric_per_channel(W: torch.Tensor, bits: int) -> torch.Tensor:
+    """Symmetric per-channel: each row gets its own scale."""
     levels = 2 ** (bits - 1) - 1
     scale = W.abs().amax(dim=-1, keepdim=True) / levels
     q = torch.round(W / scale).clamp(-levels, levels)
     return q * scale
 
 
+def quant_intN_affine_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
+    """Affine (asymmetric) quantization: range [0, 2^b - 1], uses all codes.
+
+    Maps [min, max] linearly to [0, 2^b - 1] integer codes.
+    Better than symmetric for low bit widths (2-3) because:
+      - No wasted code (2^b levels vs 2^b - 1)
+      - Zero is exactly representable via the zero-point
+      - Adapts to non-symmetric weight distributions
+    """
+    n_levels = 2 ** bits - 1  # e.g. 3 for 2-bit, 7 for 3-bit
+    w_min = W.min()
+    w_max = W.max()
+    scale = (w_max - w_min) / n_levels
+    if scale == 0:
+        return W.clone()
+    q = torch.round((W - w_min) / scale).clamp(0, n_levels)
+    return q * scale + w_min
+
+
+def quant_intN_affine_per_channel(W: torch.Tensor, bits: int) -> torch.Tensor:
+    """Affine per-channel: each row gets its own scale and zero-point."""
+    n_levels = 2 ** bits - 1
+    w_min = W.amin(dim=-1, keepdim=True)
+    w_max = W.amax(dim=-1, keepdim=True)
+    scale = (w_max - w_min) / n_levels
+    scale = scale.clamp(min=1e-10)  # avoid div by zero for constant rows
+    q = torch.round((W - w_min) / scale).clamp(0, n_levels)
+    return q * scale + w_min
+
+
+# Symmetric variants (standard for bits >= 4)
 def quant_int8_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_tensor(W, 8)
+    return quant_intN_symmetric_per_tensor(W, 8)
 
 
 def quant_int8_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_channel(W, 8)
+    return quant_intN_symmetric_per_channel(W, 8)
 
 
 def quant_int4_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_tensor(W, 4)
+    return quant_intN_symmetric_per_tensor(W, 4)
 
 
 def quant_int4_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_channel(W, 4)
+    return quant_intN_symmetric_per_channel(W, 4)
 
 
-def quant_int3_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_tensor(W, 3)
-
-
-def quant_int3_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_channel(W, 3)
-
-
+# Affine variants for low bits (2, 3) — uses all 2^b codes
 def quant_int2_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_tensor(W, 2)
+    return quant_intN_affine_per_tensor(W, 2)
 
 
 def quant_int2_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_per_channel(W, 2)
+    return quant_intN_affine_per_channel(W, 2)
+
+
+def quant_int3_per_tensor(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_affine_per_tensor(W, 3)
+
+
+def quant_int3_per_channel(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_affine_per_channel(W, 3)
 
 
 def quant_fp8_e4m3(W: torch.Tensor) -> torch.Tensor:
