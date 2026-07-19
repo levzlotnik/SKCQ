@@ -28,16 +28,11 @@ workers:
     device: auto
     chunk_budget_mb: 512    # 12GB VRAM — keep chunks small
 
-  # - name: leopard
-  #   host: leopard          # tailscale hostname
-  #   venv: leopard/.venv/bin/python
-  #   workdir: "~/Projects/SKCQ"
-  #   device: cuda           # ROCm exposes as cuda in torch
-  #   chunk_budget_mb: 12288  # ~16GB per dGPU; keep some headroom
-  #   parallelism: 2         # one job per dGPU
-  #   devices: [0, 1]        # dGPU indices (set after running the diagnostic)
-  #                         # iGPU (gfx1036) excluded — fill in correct indices
-  #                         # Run: leopard/.venv/bin/python -c "import torch; \
-  #                         #   [print(i, torch.cuda.get_device_name(i), \
-  #                         #   torch.cuda.get_device_properties(i).total_memory/1e9) \
-  #                         #   for i in range(torch.cuda.device_count())]"
+  - name: leopard
+    host: leopard          # tailscale hostname
+    venv: leopard/.venv/bin/python
+    workdir: "~/Projects/SKCQ"
+    device: cuda           # ROCm exposes as cuda in torch
+    chunk_budget_mb: 24576  # 34GB per R9700; ~24GB headroom per job
+    parallelism: 2         # one job per dGPU
+    devices: [0, 1]        # dGPU indices; iGPU (gfx1036) excluded
