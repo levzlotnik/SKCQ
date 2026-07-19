@@ -1,0 +1,7 @@
+workers:
+  - name: local-cuda
+    host: localhost
+    venv: .venv/bin/python
+    workdir: "."
+    device: cuda
+    parallelism: 1
