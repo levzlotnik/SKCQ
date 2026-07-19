@@ -716,7 +716,7 @@ def build_codebook(
                 norm_threshold=params.norm_threshold,
                 skip_zeros=params.skip_zeros if c == 0 else False,
                 device=device,
-                name=f"{name} cb={c}/{n_codebooks} (shared, bs={cur_bs})",
+                name=f"{name} cb={c}/{n_codebooks}",
                 distance_metric=metric,
                 chunk_budget_mb=params.chunk_budget_mb,
                 max_train_samples=2**23,
