@@ -234,10 +234,14 @@ def _euclidean_kmeans(
     name: str,
     chunk_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Standard euclidean (l2) k-means with Sobol init and tqdm progress bar.
+    """Standard euclidean (l2) k-means with random data-point init and tqdm.
 
     Assignment: argmin ||x_i - centroid_c||^2
     Update:     centroid_c = mean(x_i for i in c)
+
+    Init: k random data points (forgy init). Unlike Sobol in [-1,1]^d,
+    this adapts to the data's actual scale and location — critical for
+    residual codebooks where data lives in a tiny region near the origin.
 
     Args:
         data: (n, d) — raw data on CPU
@@ -248,9 +252,10 @@ def _euclidean_kmeans(
     n, d = data.shape
     k_eff = min(k, n)
 
-    # Sobol init in [-1,1]^d — O(k), no data dependency
-    logger.info("[%s] Sobol init (k=%d, d=%d, euclidean)...", name, k_eff, d)
-    centroids = _sobol_unit_cube(k_eff, d, device)  # (k, d)
+    # Forgy init: k random data points — adapts to data scale/location
+    logger.info("[%s] Forgy init (k=%d, d=%d, euclidean)...", name, k_eff, d)
+    perm = torch.randperm(n, device=data.device)[:k_eff]
+    centroids = data[perm].to(device).clone()  # (k, d)
 
     pbar = tqdm(range(max_iters), desc=name, leave=True)
     for it in pbar:
@@ -267,11 +272,12 @@ def _euclidean_kmeans(
             new_centroids.index_add_(0, chunk_labels, chunk)
             counts.index_add_(0, chunk_labels, torch.ones(end - i, device=device))
 
-        # Handle empty clusters: re-init from Sobol
+        # Handle empty clusters: re-init from random data points
         empty = counts == 0
         n_empty = empty.sum().item()
         if n_empty > 0:
-            new_centroids[empty] = _sobol_unit_cube(n_empty, d, device)
+            reperm = torch.randperm(n, device=data.device)[:n_empty]
+            new_centroids[empty] = data[reperm].to(device)
         new_centroids[~empty] = new_centroids[~empty] / counts[~empty].unsqueeze(-1)
 
         # Check convergence
