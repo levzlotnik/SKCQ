@@ -27,3 +27,11 @@ workers:
     workdir: "~/Projects/SKCQ"
     device: auto
     chunk_budget_mb: 512    # 12GB VRAM — keep chunks small
+
+  # - name: leopard
+  #   host: leopard          # tailscale hostname
+  #   venv: leopard/.venv/bin/python
+  #   workdir: "~/Projects/SKCQ"
+  #   device: cuda           # ROCm exposes as cuda in torch
+  #   chunk_budget_mb: 3072  # dual R9700 — ~16GB each VRAM
+  #   parallelism: 2         # one job per GPU

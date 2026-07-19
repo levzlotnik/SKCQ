@@ -14,8 +14,12 @@ This repo is NOT a single environment. Pick the venv that matches the task:
   tools in its `[dependency-groups] dev` (ruff, mypy, pytest).
 - **`cuda/.venv`** (`cuda/pyproject.toml`): CUDA torch for the RTX 3090. Runs
   `eval_quantized.py` and the k-means offload server (`skcq.cuda_server`).
+- **`leopard/.venv`** (`leopard/pyproject.toml`): ROCm torch for RDNA4 dGPUs
+  (gfx1201, e.g. Radeon RX 9700). Sweep worker only — runs
+  `experiments/weight_quant_error.py`. Wheel index: `gfx120X-all/`.
 
 Create both GPU venvs with `./setup.sh` (runs `uv sync` in `rocm/` and `cuda/`).
+Create the leopard venv with `(cd leopard && uv sync)`.
 Remote workers use `./setup_worker.sh` which creates a plain `.venv` with a
 platform-detected torch build.
 
