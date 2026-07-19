@@ -111,6 +111,36 @@ class CodebookResult:
     shared_codebook: bool = False
     sign_bits: torch.Tensor | None = None  # (n_rows, n_blocks, block_size) if sign_split
 
+    def block_size(self) -> int:
+        """Sub-vector block size (in_dim / n_blocks)."""
+        return self.codebooks[0].shape[1]
+
+    def reconstruct(self) -> torch.Tensor:
+        """Decode the quantized weight matrix (n_rows, in_dim).
+
+        All codebook contributions are summed per block, then the single
+        refit scale is applied, and signs (if SSVQ) are reapplied.
+        """
+        n_blocks = self.n_blocks
+        block_size = self.block_size()
+        n_rows = self.scales.shape[0]
+        recon_blocks = []
+        for b in range(n_blocks):
+            final_direction = torch.zeros(n_rows, block_size, dtype=torch.float32)
+            for c in range(self.n_codebooks):
+                if self.shared_codebook:
+                    cb_b = self.codebooks[c][0].float()
+                else:
+                    cb_b = self.codebooks[c][b].float()
+                asg_b = self.assignments[c][b]
+                final_direction = final_direction + cb_b.t()[asg_b]
+            scale_b = self.scales[:, b].float()
+            recon_block = scale_b.unsqueeze(-1) * final_direction
+            if self.sign_bits is not None:
+                recon_block = self.sign_bits[:, b, :].float() * recon_block
+            recon_blocks.append(recon_block)
+        return torch.cat(recon_blocks, dim=1)
+
 
 DistanceMetric = Literal["cosine", "euclidean"]
 

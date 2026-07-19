@@ -205,24 +205,8 @@ def quantize_scales(scales: torch.Tensor, dtype: str) -> torch.Tensor:
 # Spherical k-means reconstruction
 # ---------------------------------------------------------------------------
 def reconstruct_from_codebook(result, n_rows: int, n_blocks: int, block_size: int):
-    """Reconstruct weight matrix from CodebookResult (all on CPU)."""
-    recon_blocks = []
-    for b in range(n_blocks):
-        final_direction = torch.zeros(n_rows, block_size, dtype=torch.float32)
-        for c in range(result.n_codebooks):
-            if result.shared_codebook:
-                cb_b = result.codebooks[c][0].float()
-            else:
-                cb_b = result.codebooks[c][b].float()
-            asg_b = result.assignments[c][b]
-            final_direction = final_direction + cb_b.t()[asg_b]
-        scale_b = result.scales[:, b].float()
-        recon_block = scale_b.unsqueeze(-1) * final_direction
-        # Reapply signs if sign-split was used
-        if result.sign_bits is not None:
-            recon_block = result.sign_bits[:, b, :].float() * recon_block
-        recon_blocks.append(recon_block)
-    return torch.cat(recon_blocks, dim=1)
+    """Reconstruct weight matrix from CodebookResult (delegates to result.reconstruct)."""
+    return result.reconstruct()
 
 
 def bits_per_weight_kmeans(
