@@ -614,8 +614,13 @@ def build_codebook(
             assigned = result_pool.codebook.t()[result_pool.labels]  # (n_rows*n_blocks, block_size)
             assigned = assigned.reshape(n_rows, n_blocks, block_size)
             assigned[zero_mask] = 0.0
-            dot = torch.einsum('nbd,nbd->nb', unit_residual, assigned).unsqueeze(-1)
-            unit_residual = unit_residual - dot * assigned
+            if metric == "cosine":
+                # Spherical: subtract projection (dot * centroid)
+                dot = torch.einsum('nbd,nbd->nb', unit_residual, assigned).unsqueeze(-1)
+                unit_residual = unit_residual - dot * assigned
+            else:
+                # Euclidean: subtract centroid directly
+                unit_residual = unit_residual - assigned
         else:
             block_codebooks: list[torch.Tensor] = []
             block_assigns: list[torch.Tensor] = []
@@ -640,8 +645,11 @@ def build_codebook(
 
                 subtract = result_b.codebook.t()[result_b.labels]
                 subtract[zero_mask] = 0.0
-                dot = torch.einsum('nd,nd->n', unit_residual[:, b, :], subtract).unsqueeze(-1)
-                unit_residual[:, b, :] = unit_residual[:, b, :] - dot * subtract
+                if metric == "cosine":
+                    dot = torch.einsum('nd,nd->n', unit_residual[:, b, :], subtract).unsqueeze(-1)
+                    unit_residual[:, b, :] = unit_residual[:, b, :] - dot * subtract
+                else:
+                    unit_residual[:, b, :] = unit_residual[:, b, :] - subtract
             cb_codebooks.append(torch.stack(block_codebooks, dim=0))
             cb_assignments.append(torch.stack(block_assigns, dim=0))
 
