@@ -362,12 +362,14 @@ def run_one_kmeans(
 
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
-    rbs_tag = ""
-    for c in range(1, n_codebooks):
-        if bs_per_codebook[c] != block_size:
-            rbs_tag += f"_rbs{bs_per_codebook[c]}"
-    cb_tag = f"_cb{codebook_bits}" if codebook_bits < 16 else ""
-    label = f"kmeans_bs{block_size}_K{K}_cb{n_codebooks}_{metric[:3]}_{shared_tag}_{ssvq_tag}_{scale_dtype}{rbs_tag}{cb_tag}"
+    # Compact per-codebook identifier: cb0_b64k65536-cb1_b16k2048-cb2_b8k16
+    cb_parts = []
+    for c in range(n_codebooks):
+        cb_parts.append(f"cb{c}_b{bs_per_codebook[c]}k{k_per_codebook[c]}")
+    cb_id = "-".join(cb_parts)
+    scale_tag = f"_{scale_dtype}" if scale_dtype != "bf16" else ""
+    cb_qtag = f"_cb{codebook_bits}" if codebook_bits < 16 else ""
+    label = f"kmeans_{cb_id}_{metric[:3]}_{shared_tag}_{ssvq_tag}{scale_tag}{cb_qtag}"
     logger.info(
         "[%s] %s (n_blocks=%d, remainder=%d, K=%d, K_r=%s, bs_r=%s, cb=%d, metric=%s, shared=%s)",
         projection, label, n_blocks, remainder_dim, K, residual_k, residual_block_sizes, n_codebooks, metric, shared_codebook,
