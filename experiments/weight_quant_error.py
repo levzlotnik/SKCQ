@@ -91,115 +91,107 @@ def extract_layer_rows(model_id: str, layer_idx: int, hidden_size: int, intermed
 # ---------------------------------------------------------------------------
 # Integer baseline quantization
 # ---------------------------------------------------------------------------
-def quant_intN_symmetric_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
-    """Symmetric per-tensor: range [-2^(b-1)+1, 2^(b-1)-1], 0 is a level."""
-    levels = 2 ** (bits - 1) - 1
-    scale = W.abs().max() / levels
-    q = torch.round(W / scale).clamp(-levels, levels)
-    return q * scale
+# ---------------------------------------------------------------------------
+# Integer baseline quantization (affine, all bit widths)
+# ---------------------------------------------------------------------------
+# Affine (asymmetric) quantization: maps [min, max] -> [0, 2^b - 1].
+# Uses all 2^b codes. Stores min + scale per group (both fp16 = 32 bits overhead).
+#
+# Per-block variant uses `block_size` matching the VQ run for apples-to-apples.
+#
+# BPW accounting:
+#   per-tensor:  bits + 32/(n_rows * in_dim)  (~bits, negligible overhead)
+#   per-channel: bits + 32/in_dim             (one min+scale per row)
+#   per-block:   bits + 32/block_size         (one min+scale per block, per row)
+# Remainder columns (in_dim % block_size) kept as bf16 (16 bpw).
 
 
-def quant_intN_symmetric_per_channel(W: torch.Tensor, bits: int) -> torch.Tensor:
-    """Symmetric per-channel (per-row): each row gets its own scale."""
-    levels = 2 ** (bits - 1) - 1
-    scale = W.abs().amax(dim=-1, keepdim=True) / levels
-    q = torch.round(W / scale).clamp(-levels, levels)
-    return q * scale
+def _quant_affine(W: torch.Tensor, bits: int) -> torch.Tensor:
+    """Affine quantize W to `bits` bits. Returns reconstructed tensor."""
+    n_levels = 2 ** bits - 1
+    w_min = W.min()
+    w_max = W.max()
+    scale = (w_max - w_min) / n_levels
+    if scale == 0:
+        return W.clone()
+    q = torch.round((W - w_min) / scale).clamp(0, n_levels)
+    return q * scale + w_min
 
 
-def quant_intN_symmetric_per_block(W: torch.Tensor, bits: int, block_size: int) -> torch.Tensor:
-    """Symmetric per-block: each group of `block_size` consecutive elements gets its own scale.
+def quant_intN_per_tensor(W: torch.Tensor, bits: int) -> tuple[torch.Tensor, float]:
+    """Affine per-tensor: one min+scale for the whole tensor."""
+    n_rows, in_dim = W.shape
+    recon = _quant_affine(W, bits)
+    data_bits = bits * n_rows * in_dim
+    overhead_bits = 32  # one fp16 min + one fp16 scale
+    bpw = (data_bits + overhead_bits) / (n_rows * in_dim)
+    return recon, bpw
 
-    This is what llama.cpp GGUF Q2_K / Q3_K / Q4_K do — local scales mean
-    outliers only affect their own block. Block size 32 is common.
-    """
-    levels = 2 ** (bits - 1) - 1
+
+def quant_intN_per_channel(W: torch.Tensor, bits: int) -> tuple[torch.Tensor, float]:
+    """Affine per-channel: each row gets its own min+scale."""
+    n_rows, in_dim = W.shape
+    n_levels = 2 ** bits - 1
+    w_min = W.amin(dim=-1, keepdim=True)
+    w_max = W.amax(dim=-1, keepdim=True)
+    scale = ((w_max - w_min) / n_levels).clamp(min=1e-10)
+    q = torch.round((W - w_min) / scale).clamp(0, n_levels)
+    recon = q * scale + w_min
+    data_bits = bits * n_rows * in_dim
+    overhead_bits = 32 * n_rows  # fp16 min + fp16 scale per row
+    bpw = (data_bits + overhead_bits) / (n_rows * in_dim)
+    return recon, bpw
+
+
+def quant_intN_per_block(
+    W: torch.Tensor, bits: int, block_size: int
+) -> tuple[torch.Tensor, float]:
+    """Affine per-block: each group of `block_size` consecutive elements gets its own min+scale."""
     n_rows, in_dim = W.shape
     n_blocks = in_dim // block_size
     quant_dim = n_blocks * block_size
-    W_q = torch.empty_like(W)
-    # Quantize each block independently
+    remainder_dim = in_dim - quant_dim
+    n_levels = 2 ** bits - 1
+
+    recon = torch.empty_like(W)
     for b in range(n_blocks):
         block = W[:, b * block_size : (b + 1) * block_size]
-        scale = block.abs().max(dim=-1, keepdim=True).values / levels
-        scale = scale.clamp(min=1e-10)
-        q = torch.round(block / scale).clamp(-levels, levels)
-        W_q[:, b * block_size : (b + 1) * block_size] = q * scale
-    # Copy remainder unquantized
-    if in_dim > quant_dim:
-        W_q[:, quant_dim:] = W[:, quant_dim:]
-    return W_q
+        w_min = block.amin(dim=-1, keepdim=True)
+        w_max = block.amax(dim=-1, keepdim=True)
+        scale = ((w_max - w_min) / n_levels).clamp(min=1e-10)
+        q = torch.round((block - w_min) / scale).clamp(0, n_levels)
+        recon[:, b * block_size : (b + 1) * block_size] = q * scale + w_min
+
+    # Remainder kept as bf16
+    if remainder_dim > 0:
+        recon[:, quant_dim:] = W[:, quant_dim:]
+
+    data_bits = bits * n_rows * quant_dim
+    overhead_bits = 32 * n_blocks * n_rows  # fp16 min + fp16 scale per block per row
+    remainder_bits = 16 * n_rows * remainder_dim  # bf16 remainder
+    total_bits = data_bits + overhead_bits + remainder_bits
+    bpw = total_bits / (n_rows * in_dim)
+    return recon, bpw
 
 
-# Symmetric variants for all bit widths (0 is always representable — critical
-# for zero-centered weight distributions)
-def quant_int2_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_tensor(W, 2)
+def quant_fp8_e4m3(W: torch.Tensor) -> tuple[torch.Tensor, float]:
+    return W.to(torch.float8_e4m3fn).to(W.dtype), 8.0
 
 
-def quant_int2_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_channel(W, 2)
+def quant_fp8_e5m2(W: torch.Tensor) -> tuple[torch.Tensor, float]:
+    return W.to(torch.float8_e5m2).to(W.dtype), 8.0
 
 
-def quant_int2_per_block32(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_block(W, 2, 32)
-
-
-def quant_int3_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_tensor(W, 3)
-
-
-def quant_int3_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_channel(W, 3)
-
-
-def quant_int3_per_block32(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_block(W, 3, 32)
-
-
-def quant_int4_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_tensor(W, 4)
-
-
-def quant_int4_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_channel(W, 4)
-
-
-def quant_int4_per_block32(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_block(W, 4, 32)
-
-
-def quant_int8_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_tensor(W, 8)
-
-
-def quant_int8_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_channel(W, 8)
-
-
-def quant_fp8_e4m3(W: torch.Tensor) -> torch.Tensor:
-    return W.to(torch.float8_e4m3fn).to(W.dtype)
-
-
-def quant_fp8_e5m2(W: torch.Tensor) -> torch.Tensor:
-    return W.to(torch.float8_e5m2).to(W.dtype)
-
-
-INTEGER_SCHEMES = [
-    ("int2_per_tensor", quant_int2_per_tensor, 2),
-    ("int2_per_channel", quant_int2_per_channel, 2),
-    ("int2_per_block32", quant_int2_per_block32, 2),
-    ("int3_per_tensor", quant_int3_per_tensor, 3),
-    ("int3_per_channel", quant_int3_per_channel, 3),
-    ("int3_per_block32", quant_int3_per_block32, 3),
-    ("int4_per_tensor", quant_int4_per_tensor, 4),
-    ("int4_per_channel", quant_int4_per_channel, 4),
-    ("int4_per_block32", quant_int4_per_block32, 4),
-    ("int8_per_tensor", quant_int8_per_tensor, 8),
-    ("int8_per_channel", quant_int8_per_channel, 8),
-    ("fp8_e4m3", quant_fp8_e4m3, 8),
-    ("fp8_e5m2", quant_fp8_e5m2, 8),
-]
+def integer_schemes(block_size: int) -> list[tuple[str, callable]]:
+    """Build list of (name, quant_fn) pairs. quant_fn(W) -> (recon, bpw)."""
+    schemes: list[tuple[str, callable]] = []
+    for bits in [2, 3, 4, 8]:
+        schemes.append((f"int{bits}_per_tensor", lambda W, b=bits: quant_intN_per_tensor(W, b)))
+        schemes.append((f"int{bits}_per_channel", lambda W, b=bits: quant_intN_per_channel(W, b)))
+        schemes.append((f"int{bits}_per_block{block_size}", lambda W, b=bits, bs=block_size: quant_intN_per_block(W, b, bs)))
+    schemes.append(("fp8_e4m3", quant_fp8_e4m3))
+    schemes.append(("fp8_e5m2", quant_fp8_e5m2))
+    return schemes
 
 
 # ---------------------------------------------------------------------------
@@ -500,25 +492,25 @@ def main() -> None:
 
         # Integer baselines
         W_norm = W_raw.float().norm().item()
-        for name, quant_fn, bits in INTEGER_SCHEMES:
-            W_q = quant_fn(W_raw)
+        for name, quant_fn in integer_schemes(args.block_size):
+            W_q, bpw = quant_fn(W_raw)
             err = torch.norm(W_raw.float() - W_q.float()).item() / W_norm
             all_results.append({
                 "projection": proj_name,
                 "scheme": name,
-                "block_size": 0,
+                "block_size": args.block_size,
                 "K": 0,
                 "n_codebooks": 0,
                 "metric": "",
                 "shared": False,
                 "sign_split": False,
-                "scale_dtype": "",
+                "scale_dtype": "fp16",
                 "kmeans_iters": 0,
                 "rel_fro_err": err,
-                "bits_per_weight": float(bits),
-                "compression_ratio": 16.0 / bits,
+                "bits_per_weight": bpw,
+                "compression_ratio": 16.0 / bpw,
             })
-            logger.info("  [%s] %-20s err=%.6f bpw=%.1f", proj_name, name, err, bits)
+            logger.info("  [%s] %-25s err=%.6f bpw=%.3f", proj_name, name, err, bpw)
 
         # K-means codebook
         result = run_one_kmeans(
