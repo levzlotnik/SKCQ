@@ -43,6 +43,7 @@ class Worker:
     chunk_budget_mb: int | None = None
     parallelism: int = 1  # number of concurrent jobs on this worker
     remote: bool = False  # True if SSH needed
+    devices: list[int] | None = None  # GPU indices to assign per parallel slot
 
 
 def load_workers(yaml_path: Path) -> list[Worker]:
@@ -61,6 +62,7 @@ def load_workers(yaml_path: Path) -> list[Worker]:
                 chunk_budget_mb=w.get("chunk_budget_mb"),
                 parallelism=w.get("parallelism", 1),
                 remote=remote,
+                devices=w.get("devices"),
             )
         )
     return workers
@@ -111,16 +113,25 @@ def build_cmd(cfg: dict, worker: Worker) -> list[str]:
     return cmd
 
 
-def run_local(cfg: dict, worker: Worker, status: dict, status_lock: Lock) -> bool:
+def run_local(
+    cfg: dict, worker: Worker, status: dict, status_lock: Lock, slot_idx: int = 0
+) -> bool:
     """Run a config as a local subprocess. Returns True on success."""
     cmd = build_cmd(cfg, worker)
     env = os.environ.copy()
+    # Per-slot GPU pinning: when `devices` is set, each parallel slot gets one
+    # GPU. We set both CUDA_VISIBLE_DEVICES (NVIDIA torch) and HIP_VISIBLE_DEVICES
+    # (ROCm torch exposes AMD GPUs as cuda:0 after HIP filtering).
+    pinned_dev = (
+        worker.devices[slot_idx]
+        if worker.device == "cuda" and worker.devices and slot_idx < len(worker.devices)
+        else None
+    )
     if worker.device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
-    elif worker.device == "cuda":
-        # Use default (no override). For multi-parallelism on a single GPU,
-        # the runner should set CUDA_VISIBLE_DEVICES per process if needed.
-        pass
+    elif pinned_dev is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(pinned_dev)
+        env["HIP_VISIBLE_DEVICES"] = str(pinned_dev)
 
     log_path = REPO / "sweep_logs" / f"{cfg['id']}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,12 +180,19 @@ def run_local(cfg: dict, worker: Worker, status: dict, status_lock: Lock) -> boo
     return config_is_done(cfg)
 
 
-def run_remote(cfg: dict, worker: Worker, status: dict, status_lock: Lock) -> bool:
+def run_remote(
+    cfg: dict, worker: Worker, status: dict, status_lock: Lock, slot_idx: int = 0
+) -> bool:
     """Run a config on a remote worker via SSH. Returns True on success."""
     local_cmd = build_cmd(cfg, worker)  # already uses relative paths for remote
+    # Per-slot GPU pinning: export CUDA/HIP_VISIBLE_DEVICES before running.
+    env_prefix = ""
+    if worker.devices is not None and slot_idx < len(worker.devices):
+        dev = str(worker.devices[slot_idx])
+        env_prefix = f"export CUDA_VISIBLE_DEVICES={dev} HIP_VISIBLE_DEVICES={dev}; "
     # On the remote side: cd to workdir, git pull, run cmd, leave output
     remote_script = (
-        f"cd {shlex.quote(worker.workdir)} && git pull --quiet && "
+        f"cd {shlex.quote(worker.workdir)} && git pull --quiet && {env_prefix}"
         f"{' '.join(shlex.quote(x) for x in local_cmd)}"
     )
     ssh_cmd = ["ssh", "-o", "ConnectTimeout=10", worker.host, remote_script]
@@ -240,7 +258,12 @@ def run_remote(cfg: dict, worker: Worker, status: dict, status_lock: Lock) -> bo
 
 
 def worker_loop(
-    worker: Worker, queue: list[dict], status: dict, status_lock: Lock, idx_lock: Lock
+    worker: Worker,
+    queue: list[dict],
+    status: dict,
+    status_lock: Lock,
+    idx_lock: Lock,
+    slot_idx: int = 0,
 ) -> None:
     """Worker loop: pull next config from queue (shared index), run, repeat."""
     queue_idx = [0]
@@ -266,9 +289,9 @@ def worker_loop(
             )
 
         if worker.remote:
-            ok = run_remote(cfg, worker, status, status_lock)
+            ok = run_remote(cfg, worker, status, status_lock, slot_idx)
         else:
-            ok = run_local(cfg, worker, status, status_lock)
+            ok = run_local(cfg, worker, status, status_lock, slot_idx)
 
         dt = time.time() - t0
         with status_lock:
@@ -360,7 +383,7 @@ def main() -> None:
             queue = per_worker[w.name][slot_idx :: w.parallelism]
             t = Thread(
                 target=worker_loop,
-                args=(w, queue, status, status_lock, idx_lock),
+                args=(w, queue, status, status_lock, idx_lock, slot_idx),
                 name=f"{w.name}-{slot_idx}",
             )
             t.start()

@@ -33,5 +33,11 @@ workers:
   #   venv: leopard/.venv/bin/python
   #   workdir: "~/Projects/SKCQ"
   #   device: cuda           # ROCm exposes as cuda in torch
-  #   chunk_budget_mb: 3072  # dual R9700 — ~16GB each VRAM
-  #   parallelism: 2         # one job per GPU
+  #   chunk_budget_mb: 12288  # ~16GB per dGPU; keep some headroom
+  #   parallelism: 2         # one job per dGPU
+  #   devices: [0, 1]        # dGPU indices (set after running the diagnostic)
+  #                         # iGPU (gfx1036) excluded — fill in correct indices
+  #                         # Run: leopard/.venv/bin/python -c "import torch; \
+  #                         #   [print(i, torch.cuda.get_device_name(i), \
+  #                         #   torch.cuda.get_device_properties(i).total_memory/1e9) \
+  #                         #   for i in range(torch.cuda.device_count())]"
