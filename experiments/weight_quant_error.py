@@ -92,10 +92,7 @@ def extract_layer_rows(model_id: str, layer_idx: int, hidden_size: int, intermed
 # Integer baseline quantization
 # ---------------------------------------------------------------------------
 def quant_intN_symmetric_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
-    """Symmetric integer quantization: range [-2^(b-1)+1, 2^(b-1)-1], wastes 1 code.
-
-    For bits>=4 this is standard and near-optimal. For bits=2 it gives only 3 levels.
-    """
+    """Symmetric per-tensor: range [-2^(b-1)+1, 2^(b-1)-1], 0 is a level."""
     levels = 2 ** (bits - 1) - 1
     scale = W.abs().max() / levels
     q = torch.round(W / scale).clamp(-levels, levels)
@@ -103,50 +100,61 @@ def quant_intN_symmetric_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 def quant_intN_symmetric_per_channel(W: torch.Tensor, bits: int) -> torch.Tensor:
-    """Symmetric per-channel: each row gets its own scale."""
+    """Symmetric per-channel (per-row): each row gets its own scale."""
     levels = 2 ** (bits - 1) - 1
     scale = W.abs().amax(dim=-1, keepdim=True) / levels
     q = torch.round(W / scale).clamp(-levels, levels)
     return q * scale
 
 
-def quant_intN_affine_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
-    """Affine (asymmetric) quantization: range [0, 2^b - 1], uses all codes.
+def quant_intN_symmetric_per_block(W: torch.Tensor, bits: int, block_size: int) -> torch.Tensor:
+    """Symmetric per-block: each group of `block_size` consecutive elements gets its own scale.
 
-    Maps [min, max] linearly to [0, 2^b - 1] integer codes.
-    Better than symmetric for low bit widths (2-3) because:
-      - No wasted code (2^b levels vs 2^b - 1)
-      - Zero is exactly representable via the zero-point
-      - Adapts to non-symmetric weight distributions
+    This is what llama.cpp GGUF Q2_K / Q3_K / Q4_K do — local scales mean
+    outliers only affect their own block. Block size 32 is common.
     """
-    n_levels = 2 ** bits - 1  # e.g. 3 for 2-bit, 7 for 3-bit
-    w_min = W.min()
-    w_max = W.max()
-    scale = (w_max - w_min) / n_levels
-    if scale == 0:
-        return W.clone()
-    q = torch.round((W - w_min) / scale).clamp(0, n_levels)
-    return q * scale + w_min
+    levels = 2 ** (bits - 1) - 1
+    n_rows, in_dim = W.shape
+    n_blocks = in_dim // block_size
+    quant_dim = n_blocks * block_size
+    W_q = torch.empty_like(W)
+    # Quantize each block independently
+    for b in range(n_blocks):
+        block = W[:, b * block_size : (b + 1) * block_size]
+        scale = block.abs().max(dim=-1, keepdim=True).values / levels
+        scale = scale.clamp(min=1e-10)
+        q = torch.round(block / scale).clamp(-levels, levels)
+        W_q[:, b * block_size : (b + 1) * block_size] = q * scale
+    # Copy remainder unquantized
+    if in_dim > quant_dim:
+        W_q[:, quant_dim:] = W[:, quant_dim:]
+    return W_q
 
 
-def quant_intN_affine_per_channel(W: torch.Tensor, bits: int) -> torch.Tensor:
-    """Affine per-channel: each row gets its own scale and zero-point."""
-    n_levels = 2 ** bits - 1
-    w_min = W.amin(dim=-1, keepdim=True)
-    w_max = W.amax(dim=-1, keepdim=True)
-    scale = (w_max - w_min) / n_levels
-    scale = scale.clamp(min=1e-10)  # avoid div by zero for constant rows
-    q = torch.round((W - w_min) / scale).clamp(0, n_levels)
-    return q * scale + w_min
+# Symmetric variants for all bit widths (0 is always representable — critical
+# for zero-centered weight distributions)
+def quant_int2_per_tensor(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_tensor(W, 2)
 
 
-# Symmetric variants (standard for bits >= 4)
-def quant_int8_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_tensor(W, 8)
+def quant_int2_per_channel(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_channel(W, 2)
 
 
-def quant_int8_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_symmetric_per_channel(W, 8)
+def quant_int2_per_block32(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_block(W, 2, 32)
+
+
+def quant_int3_per_tensor(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_tensor(W, 3)
+
+
+def quant_int3_per_channel(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_channel(W, 3)
+
+
+def quant_int3_per_block32(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_block(W, 3, 32)
 
 
 def quant_int4_per_tensor(W: torch.Tensor) -> torch.Tensor:
@@ -157,21 +165,16 @@ def quant_int4_per_channel(W: torch.Tensor) -> torch.Tensor:
     return quant_intN_symmetric_per_channel(W, 4)
 
 
-# Affine variants for low bits (2, 3) — uses all 2^b codes
-def quant_int2_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_affine_per_tensor(W, 2)
+def quant_int4_per_block32(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_block(W, 4, 32)
 
 
-def quant_int2_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_affine_per_channel(W, 2)
+def quant_int8_per_tensor(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_tensor(W, 8)
 
 
-def quant_int3_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_affine_per_tensor(W, 3)
-
-
-def quant_int3_per_channel(W: torch.Tensor) -> torch.Tensor:
-    return quant_intN_affine_per_channel(W, 3)
+def quant_int8_per_channel(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_symmetric_per_channel(W, 8)
 
 
 def quant_fp8_e4m3(W: torch.Tensor) -> torch.Tensor:
@@ -185,10 +188,13 @@ def quant_fp8_e5m2(W: torch.Tensor) -> torch.Tensor:
 INTEGER_SCHEMES = [
     ("int2_per_tensor", quant_int2_per_tensor, 2),
     ("int2_per_channel", quant_int2_per_channel, 2),
+    ("int2_per_block32", quant_int2_per_block32, 2),
     ("int3_per_tensor", quant_int3_per_tensor, 3),
     ("int3_per_channel", quant_int3_per_channel, 3),
+    ("int3_per_block32", quant_int3_per_block32, 3),
     ("int4_per_tensor", quant_int4_per_tensor, 4),
     ("int4_per_channel", quant_int4_per_channel, 4),
+    ("int4_per_block32", quant_int4_per_block32, 4),
     ("int8_per_tensor", quant_int8_per_tensor, 8),
     ("int8_per_channel", quant_int8_per_channel, 8),
     ("fp8_e4m3", quant_fp8_e4m3, 8),
