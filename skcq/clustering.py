@@ -137,6 +137,9 @@ class CodebookResult:
         Each codebook contributes at its own block size. All contributions
         are summed element-wise within each primary block, then the single
         refit scale is applied, and signs (if SSVQ) are reapplied.
+
+        Supports residual block sizes that are smaller (finer sub-blocks)
+        or larger (coarser, spanning multiple primary blocks) than primary.
         """
         n_blocks = self.n_blocks
         bs_p = self.block_size()
@@ -144,20 +147,35 @@ class CodebookResult:
         bs_list = self.bs_per_codebook()
         recon_blocks = []
         for b in range(n_blocks):
+            col_start_p = b * bs_p
             final_direction = torch.zeros(n_rows, bs_p, dtype=torch.float32)
             for c in range(self.n_codebooks):
                 bs_c = bs_list[c]
-                ratio_c = bs_p // bs_c  # sub-blocks per primary block
-                for sub in range(ratio_c):
-                    b_c = b * ratio_c + sub
+                if bs_c <= bs_p:
+                    # Residual is finer: multiple sub-blocks per primary block
+                    ratio = bs_p // bs_c
+                    for sub in range(ratio):
+                        b_c = b * ratio + sub
+                        if self.shared_codebook:
+                            cb_c = self.codebooks[c][0].float()
+                        else:
+                            cb_c = self.codebooks[c][b_c].float()
+                        asg_c = self.assignments[c][b_c]
+                        sub_dir = cb_c.t()[asg_c]
+                        col_offset = sub * bs_c
+                        final_direction[:, col_offset : col_offset + bs_c] += sub_dir
+                else:
+                    # Residual is coarser: one residual block spans multiple primary blocks
+                    ratio = bs_c // bs_p  # primary blocks per residual block
+                    b_c = b // ratio  # which residual block contains this primary block
+                    col_offset = (b % ratio) * bs_p  # offset within the residual block
                     if self.shared_codebook:
                         cb_c = self.codebooks[c][0].float()
                     else:
                         cb_c = self.codebooks[c][b_c].float()
                     asg_c = self.assignments[c][b_c]
-                    sub_dir = cb_c.t()[asg_c]  # (n_rows, bs_c)
-                    col_start = sub * bs_c
-                    final_direction[:, col_start : col_start + bs_c] += sub_dir
+                    full_dir = cb_c.t()[asg_c]  # (n_rows, bs_c)
+                    final_direction += full_dir[:, col_offset : col_offset + bs_p]
             scale_b = self.scales[:, b].float()
             recon_block = scale_b.unsqueeze(-1) * final_direction
             if self.sign_bits is not None:
@@ -632,7 +650,8 @@ def build_codebook(
         raise ValueError(f"in_dim={in_dim} not divisible by n_blocks={n_blocks}")
     block_size = in_dim // n_blocks
 
-    # Residual block sizes: each must divide primary block_size
+    # Residual block sizes: each must divide OR be a multiple of primary block_size
+    # (residual can be finer OR coarser than primary)
     # Build bs_per_codebook = [primary_bs, residual_bs_1, residual_bs_2, ...]
     rbs_list_raw = params.residual_block_sizes
     if rbs_list_raw is None:
@@ -644,8 +663,13 @@ def build_codebook(
             raise ValueError(f"residual_block_sizes has {len(rbs_list_raw)} values, need {n_codebooks - 1}")
         rbs_list = list(rbs_list_raw[:n_codebooks - 1])
     for i, rbs in enumerate(rbs_list):
-        if block_size % rbs != 0:
-            raise ValueError(f"residual_block_sizes[{i}]={rbs} must divide primary block_size={block_size}")
+        if rbs <= 0:
+            raise ValueError(f"residual_block_sizes[{i}]={rbs} must be positive")
+        if block_size % rbs != 0 and rbs % block_size != 0:
+            raise ValueError(
+                f"residual_block_sizes[{i}]={rbs} must divide or be a multiple of "
+                f"primary block_size={block_size}"
+            )
     bs_per_codebook = [block_size] + rbs_list
 
     row_norms = rows.norm(dim=-1)
@@ -794,17 +818,31 @@ def build_codebook(
         final_direction = torch.zeros(n_rows, block_size, dtype=torch.float32, device=device)
         for c in range(n_codebooks):
             bs_c = bs_per_codebook[c]
-            ratio_c = block_size // bs_c
-            for sub in range(ratio_c):
-                b_c = b * ratio_c + sub
+            if bs_c <= block_size:
+                # Finer: multiple sub-blocks per primary block
+                ratio_c = block_size // bs_c
+                for sub in range(ratio_c):
+                    b_c = b * ratio_c + sub
+                    if shared_codebook:
+                        cb_c = cb_codebooks[c][0]
+                    else:
+                        cb_c = cb_codebooks[c][b_c]
+                    asg_c = cb_assignments[c][b_c]
+                    sub_dir = cb_c.t()[asg_c]
+                    col_start = sub * bs_c
+                    final_direction[:, col_start : col_start + bs_c] += sub_dir
+            else:
+                # Coarser: one residual block spans multiple primary blocks
+                ratio_c = bs_c // block_size
+                b_c = b // ratio_c
+                col_offset = (b % ratio_c) * block_size
                 if shared_codebook:
                     cb_c = cb_codebooks[c][0]
                 else:
                     cb_c = cb_codebooks[c][b_c]
                 asg_c = cb_assignments[c][b_c]
-                sub_dir = cb_c.t()[asg_c]
-                col_start = sub * bs_c
-                final_direction[:, col_start : col_start + bs_c] += sub_dir
+                full_dir = cb_c.t()[asg_c]  # (n_rows, bs_c)
+                final_direction += full_dir[:, col_offset : col_offset + block_size]
         raw_block = raw_blocks[:, b, :]
         if sign_split and signs is not None:
             raw_block = raw_block * signs[:, b, :]
