@@ -277,6 +277,7 @@ def bits_per_weight_kmeans(
     sign_split: bool = False,
     scale_bits_per_elem: int = 16,
     residual_block_size: int | None = None,
+    codebook_bits: int = 16,
 ) -> float:
     """Compute effective bits per weight for k-means quantization."""
     bs_r = residual_block_size if residual_block_size is not None else block_size
@@ -285,9 +286,10 @@ def bits_per_weight_kmeans(
     n_cb_r = 1 if shared_codebook else n_blocks_r
 
     # Codebook storage: c=0 at block_size, c>=1 at bs_r
-    codebook_bits = n_cb * k_per_codebook[0] * block_size * 16
+    # Per-centroid scales absorbed into row_scale re-fit — zero overhead
+    codebook_bits_total = n_cb * k_per_codebook[0] * block_size * codebook_bits
     for c in range(1, n_codebooks):
-        codebook_bits += n_cb_r * k_per_codebook[c] * bs_r * 16
+        codebook_bits_total += n_cb_r * k_per_codebook[c] * bs_r * codebook_bits
 
     # Assignments: c=0 at n_blocks, c>=1 at n_blocks_r
     assign_bits = 0
@@ -307,7 +309,7 @@ def bits_per_weight_kmeans(
     # Signs: 1 bit per element (always at primary block size)
     sign_bits = n_rows * n_blocks * block_size if sign_split else 0
 
-    total_bits = codebook_bits + assign_bits + scale_bits + sign_bits
+    total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits
     total_weights = n_rows * in_dim
     return total_bits / total_weights
 
@@ -332,6 +334,7 @@ def run_one_kmeans(
     max_iters: int = 100,
     scale_dtype: str = "bf16",
     residual_block_size: int | None = None,
+    codebook_bits: int = 16,
     layer_idx: int = 24,
     device: torch.device | None = None,
     chunk_budget_mb: int = 256,
@@ -350,7 +353,8 @@ def run_one_kmeans(
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
     rbs_tag = f"_rbs{residual_block_size}" if residual_block_size is not None else ""
-    label = f"kmeans_bs{block_size}_K{K}_cb{n_codebooks}_{metric[:3]}_{shared_tag}_{ssvq_tag}_{scale_dtype}{rbs_tag}"
+    cb_tag = f"_cb{codebook_bits}" if codebook_bits < 16 else ""
+    label = f"kmeans_bs{block_size}_K{K}_cb{n_codebooks}_{metric[:3]}_{shared_tag}_{ssvq_tag}_{scale_dtype}{rbs_tag}{cb_tag}"
     logger.info(
         "[%s] %s (n_blocks=%d, remainder=%d, K=%d, cb=%d, metric=%s, krm=%.1f, shared=%s)",
         projection, label, n_blocks, remainder_dim, K, n_codebooks, metric, k_residual_mult, shared_codebook,
@@ -386,6 +390,7 @@ def run_one_kmeans(
         shared_codebook=shared_codebook,
         sign_split=sign_split,
         residual_block_size=residual_block_size,
+        codebook_bits=codebook_bits,
     )
 
     # Quantize scales (full-precision fp32 → target dtype → dequantized fp32)
@@ -406,6 +411,7 @@ def run_one_kmeans(
         shared_codebook=shared_codebook, sign_split=sign_split,
         scale_bits_per_elem=sc_bits,
         residual_block_size=residual_block_size,
+        codebook_bits=codebook_bits,
     )
     if remainder_dim > 0:
         total_bits = bpw_quant * n_rows * quant_dim + 16 * n_rows * remainder_dim
@@ -454,6 +460,7 @@ def main() -> None:
     parser.add_argument("--sign-split", action="store_true", help="Extract signs, cluster on first orthant (SSVQ)")
     parser.add_argument("--krm", type=float, default=1.0, help="K_0/K_r ratio: primary codebook size divided by residual codebook size (e.g. 32 means K_r = K/32). Default 1.0 = equal sizes")
     parser.add_argument("--residual-block-size", type=int, default=None, help="Block size for residual codebooks (must divide --block-size). Default: same as primary")
+    parser.add_argument("--codebook-bits", type=int, default=16, help="Bits per codebook element (16=fp16, 8=int8). Per-centroid scale absorbed into row_scale")
     parser.add_argument("--kmeans-iters", type=int, default=100, help="Max k-means iterations")
     parser.add_argument(
         "--scale-dtype", type=str, default="bf16",
@@ -554,6 +561,7 @@ def main() -> None:
             max_iters=args.kmeans_iters,
             scale_dtype=args.scale_dtype,
             residual_block_size=args.residual_block_size,
+            codebook_bits=args.codebook_bits,
             layer_idx=args.layer,
             device=device,
             chunk_budget_mb=args.chunk_budget_mb,

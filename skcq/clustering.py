@@ -573,6 +573,7 @@ def build_codebook(
     shared_codebook: bool = False,
     sign_split: bool = False,
     residual_block_size: int | None = None,
+    codebook_bits: int = 16,
 ) -> CodebookResult:
     """Build a unit-sphere residual PQ codebook for one projection.
 
@@ -735,6 +736,22 @@ def build_codebook(
         if c < n_codebooks - 1 and cur_bs != block_size:
             unit_residual = unit_residual.reshape(n_rows, n_blocks, block_size)
             raw_residual = raw_residual.reshape(n_rows, n_blocks, block_size)
+
+    # Quantize codebook centroids to int8 (per-centroid symmetric scale).
+    # Each centroid (column of the codebook) gets its own scale, absorbed
+    # into the row_scale re-fit below. Per-centroid scales are negligible
+    # storage (K values per codebook vs n_rows*n_blocks row scales).
+    if codebook_bits < 16:
+        levels = 2 ** (codebook_bits - 1) - 1
+        for c in range(n_codebooks):
+            cb = cb_codebooks[c]  # (n_blocks_or_1, bs, K_c)
+            flat = cb.reshape(-1, cb.shape[-1])  # (n_blocks_or_1 * bs, K_c)
+            # Per-centroid (per-column) scale
+            cb_max = flat.abs().max(dim=0).values.clamp(min=1e-10)  # (K_c,)
+            scale = cb_max / levels
+            q = torch.round(flat / scale).clamp(-levels, levels)
+            cb_codebooks[c] = (q * scale).reshape(cb.shape).to(cb.dtype)
+            logger.info("[%s] codebook[%d] quantized to int%d (per-centroid scale)", name, c, codebook_bits)
 
     # Re-fit a single scale per (row, primary block) to the final reconstructed direction.
     # Keep scales as (n_rows, n_blocks) — n_blocks = primary blocks.
