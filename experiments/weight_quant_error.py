@@ -91,28 +91,50 @@ def extract_layer_rows(model_id: str, layer_idx: int, hidden_size: int, intermed
 # ---------------------------------------------------------------------------
 # Integer baseline quantization
 # ---------------------------------------------------------------------------
-def quant_int8_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    scale = W.abs().max() / 127
-    q = torch.round(W / scale).clamp(-127, 127)
+def quant_intN_per_tensor(W: torch.Tensor, bits: int) -> torch.Tensor:
+    levels = 2 ** (bits - 1) - 1
+    scale = W.abs().max() / levels
+    q = torch.round(W / scale).clamp(-levels, levels)
     return q * scale
+
+
+def quant_intN_per_channel(W: torch.Tensor, bits: int) -> torch.Tensor:
+    levels = 2 ** (bits - 1) - 1
+    scale = W.abs().amax(dim=-1, keepdim=True) / levels
+    q = torch.round(W / scale).clamp(-levels, levels)
+    return q * scale
+
+
+def quant_int8_per_tensor(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_per_tensor(W, 8)
 
 
 def quant_int8_per_channel(W: torch.Tensor) -> torch.Tensor:
-    scale = W.abs().amax(dim=-1, keepdim=True) / 127
-    q = torch.round(W / scale).clamp(-127, 127)
-    return q * scale
+    return quant_intN_per_channel(W, 8)
 
 
 def quant_int4_per_tensor(W: torch.Tensor) -> torch.Tensor:
-    scale = W.abs().max() / 7
-    q = torch.round(W / scale).clamp(-7, 7)
-    return q * scale
+    return quant_intN_per_tensor(W, 4)
 
 
 def quant_int4_per_channel(W: torch.Tensor) -> torch.Tensor:
-    scale = W.abs().amax(dim=-1, keepdim=True) / 7
-    q = torch.round(W / scale).clamp(-7, 7)
-    return q * scale
+    return quant_intN_per_channel(W, 4)
+
+
+def quant_int3_per_tensor(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_per_tensor(W, 3)
+
+
+def quant_int3_per_channel(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_per_channel(W, 3)
+
+
+def quant_int2_per_tensor(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_per_tensor(W, 2)
+
+
+def quant_int2_per_channel(W: torch.Tensor) -> torch.Tensor:
+    return quant_intN_per_channel(W, 2)
 
 
 def quant_fp8_e4m3(W: torch.Tensor) -> torch.Tensor:
@@ -124,10 +146,14 @@ def quant_fp8_e5m2(W: torch.Tensor) -> torch.Tensor:
 
 
 INTEGER_SCHEMES = [
-    ("int8_per_tensor", quant_int8_per_tensor, 8),
-    ("int8_per_channel", quant_int8_per_channel, 8),
+    ("int2_per_tensor", quant_int2_per_tensor, 2),
+    ("int2_per_channel", quant_int2_per_channel, 2),
+    ("int3_per_tensor", quant_int3_per_tensor, 3),
+    ("int3_per_channel", quant_int3_per_channel, 3),
     ("int4_per_tensor", quant_int4_per_tensor, 4),
     ("int4_per_channel", quant_int4_per_channel, 4),
+    ("int8_per_tensor", quant_int8_per_tensor, 8),
+    ("int8_per_channel", quant_int8_per_channel, 8),
     ("fp8_e4m3", quant_fp8_e4m3, 8),
     ("fp8_e5m2", quant_fp8_e5m2, 8),
 ]
