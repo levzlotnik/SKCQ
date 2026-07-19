@@ -65,14 +65,22 @@ def compression_ratio(
     k_dn: int,
     n_blocks: int,
     n_codebooks: int,
-    residual_k: int | None,
+    residual_k: int | list[int] | None,
     hidden_size: int,
     intermediate_size: int,
     num_experts: int,
 ) -> float:
     """Total quantized bits / total original bits for one layer's MoE."""
-    k_list_gu = [k_gu if c == 0 else (residual_k or k_gu) for c in range(n_codebooks)]
-    k_list_dn = [k_dn if c == 0 else (residual_k or k_dn) for c in range(n_codebooks)]
+    rk = residual_k
+    if rk is None:
+        k_list_gu = [k_gu] * n_codebooks
+        k_list_dn = [k_dn] * n_codebooks
+    elif isinstance(rk, int):
+        k_list_gu = [k_gu if c == 0 else rk for c in range(n_codebooks)]
+        k_list_dn = [k_dn if c == 0 else rk for c in range(n_codebooks)]
+    else:  # list[int]
+        k_list_gu = [k_gu if c == 0 else rk[c - 1] for c in range(n_codebooks)]
+        k_list_dn = [k_dn if c == 0 else rk[c - 1] for c in range(n_codebooks)]
     # gate + up (in=hidden, out=intermediate), down (in=intermediate, out=hidden)
     orig = 2 * original_bits(hidden_size, intermediate_size, num_experts) + original_bits(
         intermediate_size, hidden_size, num_experts
@@ -88,7 +96,7 @@ def gen_config(
     r: int,
     n_blocks: int,
     n_codebooks: int,
-    residual_k: int | None,
+    residual_k: int | list[int] | None,
     hidden_size: int,
     intermediate_size: int,
     num_experts: int,

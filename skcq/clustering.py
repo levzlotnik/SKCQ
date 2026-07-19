@@ -40,9 +40,10 @@ class CodebookParams(BaseModel):
         default=True,
         description="Whether to exclude near-zero rows from codebook building",
     )
-    residual_k: int | None = Field(
+    residual_k: int | list[int] | None = Field(
         default=None,
-        description="K for residual codebooks (c>=1). If None, same as primary K.",
+        description="K for residual codebooks (c>=1). If int, all residuals use that K. "
+        "If list, residual_k[c-1] is used for codebook c. If None, same as primary K.",
     )
     chunk_budget_mb: int = Field(
         default=2048,
@@ -62,7 +63,7 @@ class LayerOverride(BaseModel):
     max_iters: int | None = None
     norm_threshold: float | None = None
     skip_zeros: bool | None = None
-    residual_k: int | None = None
+    residual_k: int | list[int] | None = None
     chunk_budget_mb: int | None = None
 
 
@@ -642,7 +643,16 @@ def build_codebook(
     else:
         signs = None
 
-    k_per_codebook = [k if c == 0 else (params.residual_k or k) for c in range(n_codebooks)]
+    # K per codebook: c=0 uses primary k, c>=1 uses residual_k
+    rk = params.residual_k
+    if rk is None:
+        k_per_codebook = [k] * n_codebooks
+    elif isinstance(rk, int):
+        k_per_codebook = [k if c == 0 else rk for c in range(n_codebooks)]
+    else:  # list[int]
+        if len(rk) < n_codebooks - 1:
+            raise ValueError(f"residual_k list has {len(rk)} values, need {n_codebooks - 1}")
+        k_per_codebook = [k if c == 0 else rk[c - 1] for c in range(n_codebooks)]
 
     cb_codebooks: list[torch.Tensor] = []
     cb_assignments: list[torch.Tensor] = []

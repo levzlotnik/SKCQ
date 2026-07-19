@@ -334,7 +334,7 @@ def run_one_kmeans(
     scale_dtype: str = "bf16",
     residual_block_size: int | None = None,
     codebook_bits: int = 16,
-    residual_k: int | None = None,
+    residual_k: int | list[int] | None = None,
     layer_idx: int = 24,
     device: torch.device | None = None,
     chunk_budget_mb: int = 256,
@@ -348,7 +348,15 @@ def run_one_kmeans(
     n_blocks = in_dim // block_size
     quant_dim = n_blocks * block_size
     remainder_dim = in_dim - quant_dim
-    k_per_codebook = [K if c == 0 else (residual_k or K) for c in range(n_codebooks)]
+    # K per codebook: c=0 uses K, c>=1 uses residual_k
+    if residual_k is None:
+        k_per_codebook = [K] * n_codebooks
+    elif isinstance(residual_k, int):
+        k_per_codebook = [K if c == 0 else residual_k for c in range(n_codebooks)]
+    else:  # list[int]
+        if len(residual_k) < n_codebooks - 1:
+            raise ValueError(f"residual_k list has {len(residual_k)} values, need {n_codebooks - 1}")
+        k_per_codebook = [K if c == 0 else residual_k[c - 1] for c in range(n_codebooks)]
 
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
@@ -458,7 +466,7 @@ def main() -> None:
     parser.add_argument("--metric", choices=["cosine", "euclidean"], default="cosine", help="Distance metric (cosine=spherical, euclidean=l2)")
     parser.add_argument("--shared", action="store_true", help="Use a single shared codebook across all blocks")
     parser.add_argument("--sign-split", action="store_true", help="Extract signs, cluster on first orthant (SSVQ)")
-    parser.add_argument("--residual-k", type=int, default=None, help="K for residual codebooks (c>=1). Default: same as primary K")
+    parser.add_argument("--residual-k", type=str, default=None, help="K for residual codebooks (c>=1). Int (all same) or comma-separated list (per codebook). Default: same as primary K")
     parser.add_argument("--residual-block-size", type=int, default=None, help="Block size for residual codebooks (must divide --block-size). Default: same as primary")
     parser.add_argument("--codebook-bits", type=int, default=16, help="Bits per codebook element (16=fp16, 8=int8). Per-centroid scale absorbed into row_scale")
     parser.add_argument("--kmeans-iters", type=int, default=100, help="Max k-means iterations")
@@ -474,6 +482,14 @@ def main() -> None:
     # Validate scale dtype
     args.scale_dtype = parse_scale_dtype(args.scale_dtype)
     logger.info("Scale dtype: %s (%d bits/elem)", args.scale_dtype, scale_bits_per_elem(args.scale_dtype))
+
+    # Parse residual_k: int or comma-separated list
+    if args.residual_k is not None:
+        if "," in args.residual_k:
+            args.residual_k = [int(x) for x in args.residual_k.split(",")]
+        else:
+            args.residual_k = int(args.residual_k)
+    logger.info("Residual K: %s", args.residual_k)
 
     # Resolve output path
     if args.output:
