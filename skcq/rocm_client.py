@@ -176,7 +176,16 @@ class RocmClient:
             k_list = [k if c == 0 else rk for c in range(n_codebooks)]
         else:  # list[int]
             k_list = [k if c == 0 else rk[c - 1] for c in range(n_codebooks)]
-        cb_shapes = [(n_blocks, block_size, k_c) for k_c in k_list]
+
+        rbs = params.residual_block_sizes
+        if rbs is None:
+            bs_list = [block_size] * n_codebooks
+        elif isinstance(rbs, int):
+            bs_list = [block_size if c == 0 else rbs for c in range(n_codebooks)]
+        else:  # list[int]
+            bs_list = [block_size if c == 0 else rbs[c - 1] for c in range(n_codebooks)]
+
+        cb_shapes = [(1, bs_list[c], k_list[c]) for c in range(n_codebooks)]  # shared=True assumed
         asgn_shape = (num_experts, n_blocks, out_dim)
         scales_shape = (num_experts, n_blocks, out_dim)
         mask_shape = (num_experts * out_dim,)

@@ -276,37 +276,29 @@ def bits_per_weight_kmeans(
     shared_codebook: bool = False,
     sign_split: bool = False,
     scale_bits_per_elem: int = 16,
-    residual_block_size: int | None = None,
+    bs_per_codebook: list[int] | None = None,
     codebook_bits: int = 16,
 ) -> float:
     """Compute effective bits per weight for k-means quantization."""
-    bs_r = residual_block_size if residual_block_size is not None else block_size
-    n_blocks_r = in_dim // bs_r
-    n_cb = 1 if shared_codebook else n_blocks
-    n_cb_r = 1 if shared_codebook else n_blocks_r
+    if bs_per_codebook is None:
+        bs_per_codebook = [block_size] * n_codebooks
 
-    # Codebook storage: c=0 at block_size, c>=1 at bs_r
-    # Per-centroid scales absorbed into row_scale re-fit — zero overhead
-    codebook_bits_total = n_cb * k_per_codebook[0] * block_size * codebook_bits
-    for c in range(1, n_codebooks):
-        codebook_bits_total += n_cb_r * k_per_codebook[c] * bs_r * codebook_bits
-
-    # Assignments: c=0 at n_blocks, c>=1 at n_blocks_r
+    # Codebook storage + assignments per codebook (each at its own block size)
+    codebook_bits_total = 0
     assign_bits = 0
-    for K_c in k_per_codebook[:1]:
-        if K_c <= 1:
-            assign_bits += n_rows * n_blocks * 1
+    for c in range(n_codebooks):
+        bs_c = bs_per_codebook[c]
+        n_blocks_c = in_dim // bs_c
+        n_cb_c = 1 if shared_codebook else n_blocks_c
+        codebook_bits_total += n_cb_c * k_per_codebook[c] * bs_c * codebook_bits
+        if k_per_codebook[c] <= 1:
+            assign_bits += n_rows * n_blocks_c * 1
         else:
-            assign_bits += n_rows * n_blocks * math.ceil(math.log2(K_c))
-    for K_c in k_per_codebook[1:]:
-        if K_c <= 1:
-            assign_bits += n_rows * n_blocks_r * 1
-        else:
-            assign_bits += n_rows * n_blocks_r * math.ceil(math.log2(K_c))
+            assign_bits += n_rows * n_blocks_c * math.ceil(math.log2(k_per_codebook[c]))
 
-    # Scales: one per primary block (n_blocks), not per residual sub-block
+    # Scales: one per primary block
     scale_bits = n_rows * n_blocks * scale_bits_per_elem
-    # Signs: 1 bit per element (always at primary block size)
+    # Signs: 1 bit per element (at primary block size)
     sign_bits = n_rows * n_blocks * block_size if sign_split else 0
 
     total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits
@@ -332,7 +324,7 @@ def run_one_kmeans(
     sign_split: bool = False,
     max_iters: int = 100,
     scale_dtype: str = "bf16",
-    residual_block_size: int | None = None,
+    residual_block_sizes: int | list[int] | None = None,
     codebook_bits: int = 16,
     residual_k: int | list[int] | None = None,
     layer_idx: int = 24,
@@ -358,14 +350,27 @@ def run_one_kmeans(
             raise ValueError(f"residual_k list has {len(residual_k)} values, need {n_codebooks - 1}")
         k_per_codebook = [K if c == 0 else residual_k[c - 1] for c in range(n_codebooks)]
 
+    # Block size per codebook
+    if residual_block_sizes is None:
+        bs_per_codebook = [block_size] * n_codebooks
+    elif isinstance(residual_block_sizes, int):
+        bs_per_codebook = [block_size if c == 0 else residual_block_sizes for c in range(n_codebooks)]
+    else:  # list[int]
+        if len(residual_block_sizes) < n_codebooks - 1:
+            raise ValueError(f"residual_block_sizes has {len(residual_block_sizes)} values, need {n_codebooks - 1}")
+        bs_per_codebook = [block_size if c == 0 else residual_block_sizes[c - 1] for c in range(n_codebooks)]
+
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
-    rbs_tag = f"_rbs{residual_block_size}" if residual_block_size is not None else ""
+    rbs_tag = ""
+    for c in range(1, n_codebooks):
+        if bs_per_codebook[c] != block_size:
+            rbs_tag += f"_rbs{bs_per_codebook[c]}"
     cb_tag = f"_cb{codebook_bits}" if codebook_bits < 16 else ""
     label = f"kmeans_bs{block_size}_K{K}_cb{n_codebooks}_{metric[:3]}_{shared_tag}_{ssvq_tag}_{scale_dtype}{rbs_tag}{cb_tag}"
     logger.info(
-        "[%s] %s (n_blocks=%d, remainder=%d, K=%d, K_r=%s, cb=%d, metric=%s, shared=%s)",
-        projection, label, n_blocks, remainder_dim, K, residual_k, n_codebooks, metric, shared_codebook,
+        "[%s] %s (n_blocks=%d, remainder=%d, K=%d, K_r=%s, bs_r=%s, cb=%d, metric=%s, shared=%s)",
+        projection, label, n_blocks, remainder_dim, K, residual_k, residual_block_sizes, n_codebooks, metric, shared_codebook,
     )
 
     out_dim = intermediate_size if projection != "down" else hidden_size
@@ -375,6 +380,7 @@ def run_one_kmeans(
         n_blocks_gate_up=n_blocks, n_blocks_down=n_blocks,
         n_codebooks=n_codebooks,
         residual_k=residual_k,
+        residual_block_sizes=residual_block_sizes,
         max_iters=max_iters,
         norm_threshold=0.001,
         skip_zeros=True,
@@ -397,7 +403,7 @@ def run_one_kmeans(
         distance_metric=metric,
         shared_codebook=shared_codebook,
         sign_split=sign_split,
-        residual_block_size=residual_block_size,
+        residual_block_sizes=residual_block_sizes,
         codebook_bits=codebook_bits,
     )
 
@@ -418,7 +424,7 @@ def run_one_kmeans(
         n_rows, quant_dim, n_blocks, block_size, n_codebooks, k_per_codebook,
         shared_codebook=shared_codebook, sign_split=sign_split,
         scale_bits_per_elem=sc_bits,
-        residual_block_size=residual_block_size,
+        bs_per_codebook=bs_per_codebook,
         codebook_bits=codebook_bits,
     )
     if remainder_dim > 0:
@@ -445,7 +451,7 @@ def run_one_kmeans(
         "sign_split": sign_split,
         "scale_dtype": scale_dtype,
         "kmeans_iters": max_iters,
-        "residual_block_size": residual_block_size or block_size,
+        "residual_block_sizes": [block_size] + [bs for bs in bs_per_codebook[1:] if bs != block_size] if any(bs != block_size for bs in bs_per_codebook[1:]) else [],
         "rel_fro_err": err,
         "bits_per_weight": bpw,
         "compression_ratio": comp_ratio,
@@ -467,7 +473,7 @@ def main() -> None:
     parser.add_argument("--shared", action="store_true", help="Use a single shared codebook across all blocks")
     parser.add_argument("--sign-split", action="store_true", help="Extract signs, cluster on first orthant (SSVQ)")
     parser.add_argument("--residual-k", type=str, default=None, help="K for residual codebooks (c>=1). Int (all same) or comma-separated list (per codebook). Default: same as primary K")
-    parser.add_argument("--residual-block-size", type=int, default=None, help="Block size for residual codebooks (must divide --block-size). Default: same as primary")
+    parser.add_argument("--residual-block-sizes", type=str, default=None, help="Block sizes for residual codebooks (c>=1). Int (all same) or comma-separated list. Each must divide --block-size. Default: same as primary")
     parser.add_argument("--codebook-bits", type=int, default=16, help="Bits per codebook element (16=fp16, 8=int8). Per-centroid scale absorbed into row_scale")
     parser.add_argument("--kmeans-iters", type=int, default=100, help="Max k-means iterations")
     parser.add_argument(
@@ -490,6 +496,14 @@ def main() -> None:
         else:
             args.residual_k = int(args.residual_k)
     logger.info("Residual K: %s", args.residual_k)
+
+    # Parse residual_block_sizes: int or comma-separated list
+    if args.residual_block_sizes is not None:
+        if "," in args.residual_block_sizes:
+            args.residual_block_sizes = [int(x) for x in args.residual_block_sizes.split(",")]
+        else:
+            args.residual_block_sizes = int(args.residual_block_sizes)
+    logger.info("Residual block sizes: %s", args.residual_block_sizes)
 
     # Resolve output path
     if args.output:
@@ -554,7 +568,7 @@ def main() -> None:
                 "sign_split": False,
                 "scale_dtype": "fp16",
                 "kmeans_iters": 0,
-                "residual_block_size": args.block_size,
+                "residual_block_sizes": [],
                 "rel_fro_err": err,
                 "bits_per_weight": bpw,
                 "compression_ratio": 16.0 / bpw,
@@ -576,7 +590,7 @@ def main() -> None:
             sign_split=args.sign_split,
             max_iters=args.kmeans_iters,
             scale_dtype=args.scale_dtype,
-            residual_block_size=args.residual_block_size,
+            residual_block_sizes=args.residual_block_sizes,
             codebook_bits=args.codebook_bits,
             layer_idx=args.layer,
             device=device,
@@ -592,7 +606,7 @@ def main() -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "projection", "scheme", "block_size", "K", "n_codebooks", "metric",
-        "shared", "sign_split", "scale_dtype", "kmeans_iters", "residual_block_size",
+        "shared", "sign_split", "scale_dtype", "kmeans_iters", "residual_block_sizes",
         "rel_fro_err", "bits_per_weight", "compression_ratio",
     ]
     write_header = args.overwrite or not output_csv.exists()

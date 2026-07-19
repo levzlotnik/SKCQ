@@ -45,6 +45,12 @@ class CodebookParams(BaseModel):
         description="K for residual codebooks (c>=1). If int, all residuals use that K. "
         "If list, residual_k[c-1] is used for codebook c. If None, same as primary K.",
     )
+    residual_block_sizes: int | list[int] | None = Field(
+        default=None,
+        description="Block size for residual codebooks (c>=1). Each must divide primary "
+        "block_size. If int, all residuals use that size. If list, "
+        "residual_block_sizes[c-1] for codebook c. If None, same as primary.",
+    )
     chunk_budget_mb: int = Field(
         default=2048,
         description="Memory budget (MB) for k-means chunking — reduce for low-VRAM GPUs",
@@ -64,6 +70,7 @@ class LayerOverride(BaseModel):
     norm_threshold: float | None = None
     skip_zeros: bool | None = None
     residual_k: int | list[int] | None = None
+    residual_block_sizes: int | list[int] | None = None
     chunk_budget_mb: int | None = None
 
 
@@ -111,48 +118,46 @@ class CodebookResult:
     n_codebooks: int
     shared_codebook: bool = False
     sign_bits: torch.Tensor | None = None  # (n_rows, n_blocks, block_size) if sign_split
-    residual_block_size: int | None = None  # block_size for c>=1 (None = same as primary)
+    residual_block_sizes: list[int] | None = None  # bs for c>=1 (None or empty = same as primary)
 
     def block_size(self) -> int:
         """Primary sub-vector block size (in_dim / n_blocks)."""
         return self.codebooks[0].shape[1]
 
+    def bs_per_codebook(self) -> list[int]:
+        """Block size for each codebook: [primary_bs, residual_bs_1, ...]."""
+        bs_p = self.block_size()
+        if not self.residual_block_sizes:
+            return [bs_p] * self.n_codebooks
+        return [bs_p] + list(self.residual_block_sizes)
+
     def reconstruct(self) -> torch.Tensor:
         """Decode the quantized weight matrix (n_rows, in_dim).
 
-        Primary codebook (c=0) operates at block_size. Residual codebooks
-        (c>=1) operate at residual_block_size (sub-blocks of primary blocks).
-        The single refit scale is applied per primary block, and signs (if
-        SSVQ) are reapplied per primary block element.
+        Each codebook contributes at its own block size. All contributions
+        are summed element-wise within each primary block, then the single
+        refit scale is applied, and signs (if SSVQ) are reapplied.
         """
         n_blocks = self.n_blocks
         bs_p = self.block_size()
         n_rows = self.scales.shape[0]
-        bs_r = self.residual_block_size if self.residual_block_size is not None else bs_p
-        ratio = bs_p // bs_r  # sub-blocks per primary block
+        bs_list = self.bs_per_codebook()
         recon_blocks = []
         for b in range(n_blocks):
             final_direction = torch.zeros(n_rows, bs_p, dtype=torch.float32)
-            # Primary contribution (c=0) at primary block size
-            if self.shared_codebook:
-                cb_0 = self.codebooks[0][0].float()
-            else:
-                cb_0 = self.codebooks[0][b].float()
-            asg_0 = self.assignments[0][b]
-            final_direction = final_direction + cb_0.t()[asg_0]
-            # Residual contributions (c>=1) at sub-block size
-            for c in range(1, self.n_codebooks):
-                for sub in range(ratio):
-                    b_r = b * ratio + sub  # sub-block index in residual's n_blocks
+            for c in range(self.n_codebooks):
+                bs_c = bs_list[c]
+                ratio_c = bs_p // bs_c  # sub-blocks per primary block
+                for sub in range(ratio_c):
+                    b_c = b * ratio_c + sub
                     if self.shared_codebook:
-                        cb_r = self.codebooks[c][0].float()
+                        cb_c = self.codebooks[c][0].float()
                     else:
-                        cb_r = self.codebooks[c][b_r].float()
-                    asg_r = self.assignments[c][b_r]
-                    sub_dir = cb_r.t()[asg_r]  # (n_rows, bs_r)
-                    col_start = sub * bs_r
-                    col_end = col_start + bs_r
-                    final_direction[:, col_start:col_end] += sub_dir
+                        cb_c = self.codebooks[c][b_c].float()
+                    asg_c = self.assignments[c][b_c]
+                    sub_dir = cb_c.t()[asg_c]  # (n_rows, bs_c)
+                    col_start = sub * bs_c
+                    final_direction[:, col_start : col_start + bs_c] += sub_dir
             scale_b = self.scales[:, b].float()
             recon_block = scale_b.unsqueeze(-1) * final_direction
             if self.sign_bits is not None:
@@ -573,7 +578,7 @@ def build_codebook(
     distance_metric: DistanceMetric = "cosine",
     shared_codebook: bool = False,
     sign_split: bool = False,
-    residual_block_size: int | None = None,
+    residual_block_sizes: int | list[int] | None = None,
     codebook_bits: int = 16,
 ) -> CodebookResult:
     """Build a unit-sphere residual PQ codebook for one projection.
@@ -606,18 +611,21 @@ def build_codebook(
         raise ValueError(f"in_dim={in_dim} not divisible by n_blocks={n_blocks}")
     block_size = in_dim // n_blocks
 
-    # Residual block size: must divide primary block_size
-    if residual_block_size is not None:
-        if block_size % residual_block_size != 0:
-            raise ValueError(
-                f"residual_block_size={residual_block_size} must divide "
-                f"primary block_size={block_size}"
-            )
-        bs_r = residual_block_size
-    else:
-        bs_r = block_size
-    n_blocks_r = in_dim // bs_r
-    ratio = block_size // bs_r  # sub-blocks per primary block
+    # Residual block sizes: each must divide primary block_size
+    # Build bs_per_codebook = [primary_bs, residual_bs_1, residual_bs_2, ...]
+    rbs_list_raw = params.residual_block_sizes
+    if rbs_list_raw is None:
+        rbs_list = [block_size] * (n_codebooks - 1)
+    elif isinstance(rbs_list_raw, int):
+        rbs_list = [rbs_list_raw] * (n_codebooks - 1)
+    else:  # list
+        if len(rbs_list_raw) < n_codebooks - 1:
+            raise ValueError(f"residual_block_sizes has {len(rbs_list_raw)} values, need {n_codebooks - 1}")
+        rbs_list = list(rbs_list_raw[:n_codebooks - 1])
+    for i, rbs in enumerate(rbs_list):
+        if block_size % rbs != 0:
+            raise ValueError(f"residual_block_sizes[{i}]={rbs} must divide primary block_size={block_size}")
+    bs_per_codebook = [block_size] + rbs_list
 
     row_norms = rows.norm(dim=-1)
     zero_mask = row_norms < params.norm_threshold
@@ -668,11 +676,10 @@ def build_codebook(
         k_c = k_per_codebook[c]
         metric: DistanceMetric = distance_metric if c == 0 else "euclidean"
         # Current block size and n_blocks for this codebook
-        cur_bs = block_size if c == 0 else bs_r
-        cur_n_blocks = n_blocks if c == 0 else n_blocks_r
+        cur_bs = bs_per_codebook[c]
+        cur_n_blocks = in_dim // cur_bs
 
         # Reshape residual to current block size if needed
-        # unit_residual is (n_rows, prev_n_blocks, prev_bs) → reshape to (n_rows, cur_n_blocks, cur_bs)
         if cur_bs != unit_residual.shape[2]:
             unit_residual = unit_residual.reshape(n_rows, cur_n_blocks, cur_bs)
             raw_residual = raw_residual.reshape(n_rows, cur_n_blocks, cur_bs)
@@ -742,11 +749,6 @@ def build_codebook(
             cb_codebooks.append(torch.stack(block_codebooks, dim=0))
             cb_assignments.append(torch.stack(block_assigns, dim=0))
 
-        # Reshape residual back to primary block size for scale re-fit (if not last codebook)
-        if c < n_codebooks - 1 and cur_bs != block_size:
-            unit_residual = unit_residual.reshape(n_rows, n_blocks, block_size)
-            raw_residual = raw_residual.reshape(n_rows, n_blocks, block_size)
-
     # Quantize codebook centroids to int8 (per-centroid symmetric scale).
     # Each centroid (column of the codebook) gets its own scale, absorbed
     # into the row_scale re-fit below. Per-centroid scales are negligible
@@ -756,7 +758,6 @@ def build_codebook(
         for c in range(n_codebooks):
             cb = cb_codebooks[c]  # (n_blocks_or_1, bs, K_c)
             flat = cb.reshape(-1, cb.shape[-1])  # (n_blocks_or_1 * bs, K_c)
-            # Per-centroid (per-column) scale
             cb_max = flat.abs().max(dim=0).values.clamp(min=1e-10)  # (K_c,)
             scale = cb_max / levels
             q = torch.round(flat / scale).clamp(-levels, levels)
@@ -764,38 +765,29 @@ def build_codebook(
             logger.info("[%s] codebook[%d] quantized to int%d (per-centroid scale)", name, c, codebook_bits)
 
     # Re-fit a single scale per (row, primary block) to the final reconstructed direction.
-    # Keep scales as (n_rows, n_blocks) — n_blocks = primary blocks.
+    # Each codebook contributes at its own block size — sum element-wise within
+    # each primary block.
     scales_flat = torch.zeros(n_rows, n_blocks, dtype=torch.float32, device=device)
     n_flipped = 0
     for b in range(n_blocks):
         final_direction = torch.zeros(n_rows, block_size, dtype=torch.float32, device=device)
-        # Primary (c=0) at primary block size
-        if shared_codebook:
-            cb_0 = cb_codebooks[0][0]  # (block_size, K_0)
-        else:
-            cb_0 = cb_codebooks[0][b]  # (block_size, K_0)
-        asg_0 = cb_assignments[0][b]
-        final_direction = final_direction + cb_0.t()[asg_0]
-        # Residuals (c>=1) at sub-block size
-        for c in range(1, n_codebooks):
-            for sub in range(ratio):
-                b_r = b * ratio + sub
+        for c in range(n_codebooks):
+            bs_c = bs_per_codebook[c]
+            ratio_c = block_size // bs_c
+            for sub in range(ratio_c):
+                b_c = b * ratio_c + sub
                 if shared_codebook:
-                    cb_r = cb_codebooks[c][0]  # (bs_r, K_c)
+                    cb_c = cb_codebooks[c][0]
                 else:
-                    cb_r = cb_codebooks[c][b_r]  # (bs_r, K_c)
-                asg_r = cb_assignments[c][b_r]
-                sub_dir = cb_r.t()[asg_r]  # (n_rows, bs_r)
-                col_start = sub * bs_r
-                col_end = col_start + bs_r
-                final_direction[:, col_start:col_end] += sub_dir
+                    cb_c = cb_codebooks[c][b_c]
+                asg_c = cb_assignments[c][b_c]
+                sub_dir = cb_c.t()[asg_c]
+                col_start = sub * bs_c
+                final_direction[:, col_start : col_start + bs_c] += sub_dir
         raw_block = raw_blocks[:, b, :]
-        # When sign-split is active, centroids are in the first orthant.
-        # Fold raw_block to match: use |raw_block| for scale computation.
         if sign_split and signs is not None:
             raw_block = raw_block * signs[:, b, :]
         dot = torch.einsum('nd,nd->n', raw_block, final_direction)
-        # Flip direction where dot < 0 to ensure positive scale
         neg = dot < 0
         if neg.any():
             n_flipped += neg.sum().item()
@@ -806,11 +798,11 @@ def build_codebook(
     if n_flipped > 0:
         logger.info("[%s] flipped %d/%d block-rows with negative dot(raw, direction)", name, n_flipped, n_rows * n_blocks)
 
-    # Keep assignments as list of (n_blocks, n_rows) - no reshape/permute
     assignments: list[torch.Tensor] = [a.cpu() for a in cb_assignments]
-
     codebooks_out = [cb.cpu() for cb in cb_codebooks]
 
+    # Store residual_block_sizes only if any differ from primary
+    rbs_out = [bs for bs in bs_per_codebook[1:] if bs != block_size]
     return CodebookResult(
         codebooks=codebooks_out,
         assignments=assignments,
@@ -820,5 +812,5 @@ def build_codebook(
         n_codebooks=n_codebooks,
         shared_codebook=shared_codebook,
         sign_bits=signs.cpu() if signs is not None else None,
-        residual_block_size=bs_r if bs_r != block_size else None,
+        residual_block_sizes=rbs_out if rbs_out else None,
     )
