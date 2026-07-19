@@ -1,32 +1,74 @@
-projection,block_size,K,n_codebooks,metric,shared,sign_split,scale_dtype,kmeans_iters,rel_fro_err,bits_per_weight,compression_ratio,notes
-gate,0,0,0,,,,0,0,0.049199,8.00,2.00,int8_per_tensor baseline
-gate,0,0,0,,,,0,0,0.009153,8.00,2.00,int8_per_channel baseline
-gate,0,0,0,,,,0,0,0.806575,4.00,4.00,int4_per_tensor baseline
-gate,0,0,0,,,,0,0,0.158952,4.00,4.00,int4_per_channel baseline
-gate,0,0,0,,,,0,0,0.053431,8.00,2.00,fp8_e4m3 baseline
-gate,0,0,0,,,,0,0,0.053372,8.00,2.00,fp8_e5m2 baseline
-gate,8,8192,1,euclidean,False,False,bf16,100,0.310,4.63,3.46,pre-SSVQ per-block euclidean
-gate,8,8192,1,euclidean,True,False,bf16,100,0.353,3.63,4.41,pre-SSVQ shared euclidean
-gate,8,32768,1,euclidean,True,False,bf16,100,0.298,3.89,4.11,pre-SSVQ shared euclidean
-gate,8,32768,1,cosine,True,False,bf16,100,0.269,3.89,4.11,pre-SSVQ shared cosine
-gate,16,512,2,cosine,False,False,bf16,100,0.510,4.625,3.46,pre-SSVQ residual cb=2 nb=128
-gate,8,32768,1,cosine,True,True,bf16,100,0.125,4.89,3.27,post-SSVQ bf16 scales
-gate,10,32768,1,cosine,True,True,bf16,100,0.175,4.17,3.84,post-SSVQ bf16 scales
-gate,12,32768,1,cosine,True,True,bf16,100,0.216,3.66,4.38,post-SSVQ bf16 scales
-gate,16,32768,1,cosine,True,True,bf16,100,0.282,2.97,5.39,post-SSVQ bf16 scales
-gate,8,32768,1,cosine,True,True,int8,50,0.126633,3.891,4.11,WINNER: beats int4 on both axes
-gate,8,65536,1,cosine,True,True,int8,50,0.114565,4.031,3.97,
-gate,8,16384,1,cosine,True,True,int8,50,0.139463,3.758,4.26,
-gate,8,8192,1,cosine,True,True,int8,50,0.153481,3.629,4.41,
-gate,8,32768,1,cosine,True,True,fp8_e4m3,50,0.128664,3.891,4.11,fp8 scales vs int8
-gate,8,32768,1,cosine,True,True,fp8_e5m2,50,0.136373,3.891,4.11,fp8 scales vs int8
-gate,8,8192,1,cosine,False,True,int8,50,0.141104,4.625,3.46,per-block (not shared)
-gate,6,8192,1,cosine,True,True,int8,50,0.093432,4.514,3.54,smallest error
-gate,7,16384,1,cosine,True,True,int8,50,0.110865,4.173,3.83,
-gate,7,32768,1,cosine,True,True,int8,50,0.099520,4.322,3.70,
-gate,7,32768,1,cosine,True,True,int6,50,0.130776,4.037,3.96,int6 scales
-gate,8,65536,1,cosine,True,True,int6,50,0.134276,3.781,4.23,int6 scales
-gate,9,32768,1,cosine,True,True,int8,50,0.151605,3.604,4.44,
-gate,10,65536,1,cosine,True,True,int8,50,0.162578,3.488,4.59,lowest bpw
-up,16,512,2,cosine,False,False,bf16,100,0.510,4.625,3.46,pre-SSVQ residual cb=2
-down,16,512,2,cosine,False,False,bf16,100,0.093,9.625,1.66,pre-SSVQ residual cb=2
+projection,block_size,K,n_codebooks,metric,shared,sign_split,scale_dtype,kmeans_iters,residual_block_sizes,rel_fro_err,bits_per_weight,compression_ratio,notes
+gate,0,0,0,,False,False,,0,,0.049199,8.000,2.00,int8_per_tensor (symmetric)
+gate,0,0,0,,False,False,,0,,0.009153,8.016,2.00,int8_per_channel (symmetric)
+gate,0,0,0,,False,False,,0,,0.062176,8.000,2.00,int8_per_tensor (affine)
+gate,0,0,0,,False,False,,0,,0.012302,8.016,2.00,int8_per_channel (affine)
+gate,0,0,0,,False,False,,0,,0.806575,4.000,4.00,int4_per_tensor (symmetric)
+gate,0,0,0,,False,False,,0,,0.140009,4.016,3.98,int4_per_channel (symmetric)
+gate,0,0,0,,False,False,,0,,0.756326,4.000,4.00,int4_per_tensor (affine)
+gate,0,0,0,,False,False,,0,,0.140009,4.016,3.98,int4_per_channel (affine)
+gate,0,0,0,,False,False,,0,,0.999986,2.000,8.00,int2_per_tensor (symmetric)
+gate,0,0,0,,False,False,,0,,0.714541,2.016,7.94,int2_per_channel (symmetric)
+gate,0,0,0,,False,False,,0,,4.142136,2.000,8.00,int2_per_tensor (affine — broken)
+gate,0,0,0,,False,False,,0,,0.714541,2.016,7.94,int2_per_channel (affine — same as symmetric)
+gate,0,0,0,,False,False,,0,,0.399795,3.000,5.33,int2_per_block32 (symmetric)
+gate,0,0,0,,False,False,,0,,0.460561,2.500,6.40,int2_per_block64 (symmetric)
+gate,0,0,0,,False,False,,0,,1.039891,3.000,5.33,int3_per_tensor (symmetric)
+gate,0,0,0,,False,False,,0,,0.299113,3.016,5.31,int3_per_channel (symmetric)
+gate,0,0,0,,False,False,,0,,0.171473,4.000,4.00,int3_per_block32 (symmetric)
+gate,0,0,0,,False,False,,0,,0.196724,3.500,4.57,int3_per_block64 (symmetric)
+gate,0,0,0,,False,False,,0,,0.080210,5.000,3.20,int4_per_block32 (symmetric)
+gate,0,0,0,,False,False,,0,,0.092874,4.500,3.56,int4_per_block64 (symmetric)
+gate,0,0,0,,False,False,,0,,0.007650,8.500,1.88,int8_per_block64 (symmetric)
+gate,0,0,0,,False,False,,0,,0.053431,8.000,2.00,fp8_e4m3
+gate,0,0,0,,False,False,,0,,0.053372,8.000,2.00,fp8_e5m2
+gate,8,8192,1,euclidean,False,False,bf16,100,,0.310,4.630,3.46,pre-SSVQ per-block euclidean
+gate,8,8192,1,euclidean,True,False,bf16,100,,0.353,3.630,4.41,pre-SSVQ shared euclidean
+gate,8,32768,1,euclidean,True,False,bf16,100,,0.298,3.890,4.11,pre-SSVQ shared euclidean
+gate,8,32768,1,cosine,True,False,bf16,100,,0.269,3.890,4.11,pre-SSVQ shared cosine
+gate,16,512,2,cosine,False,False,bf16,100,,0.510,4.625,3.46,pre-SSVQ residual cb=2 nb=128
+gate,8,32768,1,cosine,True,True,bf16,100,,0.125,4.890,3.27,post-SSVQ bf16 scales
+gate,10,32768,1,cosine,True,True,bf16,100,,0.175,4.170,3.84,post-SSVQ bf16 scales
+gate,12,32768,1,cosine,True,True,bf16,100,,0.216,3.660,4.38,post-SSVQ bf16 scales
+gate,16,32768,1,cosine,True,True,bf16,100,,0.282,2.970,5.39,post-SSVQ bf16 scales
+gate,8,8192,1,cosine,True,True,int8,50,,0.153481,3.629,4.41,SSVQ int8 scales — beats int4 both axes
+gate,8,16384,1,cosine,True,True,int8,50,,0.139463,3.758,4.26,SSVQ int8 scales
+gate,8,32768,1,cosine,True,True,int8,50,,0.126633,3.891,4.11,WINNER — beats int4 on both axes
+gate,8,65536,1,cosine,True,True,int8,50,,0.114565,4.031,3.97,
+gate,8,32768,1,cosine,True,True,fp8_e4m3,50,,0.128664,3.891,4.11,fp8 scales — slightly worse than int8
+gate,8,32768,1,cosine,True,True,fp8_e5m2,50,,0.136373,3.891,4.11,fp8 scales
+gate,8,8192,1,cosine,False,True,int8,50,,0.141104,4.625,3.46,per-block (not shared)
+gate,6,8192,1,cosine,True,True,int8,50,,0.093432,4.514,3.54,smallest error
+gate,7,16384,1,cosine,True,True,int8,50,,0.110865,4.173,3.83,
+gate,7,32768,1,cosine,True,True,int8,50,,0.099520,4.322,3.70,
+gate,7,32768,1,cosine,True,True,int6,50,,0.130776,4.037,3.96,int6 scales
+gate,8,65536,1,cosine,True,True,int6,50,,0.134276,3.781,4.23,int6 scales
+gate,8,65536,1,cosine,True,True,int8,50,,0.114565,4.031,3.97,
+gate,9,32768,1,cosine,True,True,int8,50,,0.151605,3.604,4.44,
+gate,10,65536,1,cosine,True,True,int8,50,,0.162578,3.488,4.59,lowest bpw single-cb
+gate,8,8192,2,cosine,True,True,int8,50,,0.153478,4.629,3.46,residual krm=32 (broken — old code)
+gate,32,65536,1,cosine,True,True,int8,50,,0.396146,1.875,8.53,
+gate,32,65536,2,cosine,True,True,int8,50,,0.396228,2.258,7.09,residual krm=16 (broken — old code)
+gate,32,131072,1,cosine,True,True,int8,50,,0.384214,2.031,7.88,
+gate,64,65536,1,cosine,True,True,int8,50,,0.483366,1.625,9.85,
+gate,64,65536,2,cosine,True,True,int8,50,,0.463657,1.906,8.39,residual krm=64
+gate,64,65536,1,cosine,True,True,int8,50,,0.483366,1.625,9.85,
+gate,16,65536,1,cosine,True,True,int8,50,,0.269334,2.562,6.24,
+gate,16,65536,2,cosine,True,True,int8,50,,0.269340,3.316,4.82,residual (broken — old code)
+gate,16,65536,3,cosine,True,True,int8,50,,0.267884,3.817,4.19,residual (broken — old code)
+gate,32,16384,2,cosine,True,True,int8,50,,0.402244,2.102,7.61,residual krm=32 (broken — old code)
+gate,32,16384,3,cosine,True,True,int8,50,,0.394073,2.416,6.62,residual (broken — old code)
+gate,32,16384,2,cosine,True,True,int8,50,"8",0.386357,2.844,5.63,rbs8 krm=32 — Forgy fix
+gate,32,16384,2,cosine,True,True,int8,50,"8",0.388330,2.719,5.88,rbs8 krm=64
+gate,32,16384,2,cosine,True,True,int8,50,"16",0.396961,2.282,7.01,rbs16 krm=32
+gate,32,16384,1,cosine,True,True,int8,50,,0.407897,1.781,8.98,
+gate,32,32768,1,cosine,True,True,int8,50,,0.396146,1.875,8.53,
+gate,64,16384,1,cosine,True,True,int8,50,"8",0.502964,1.406,11.38,
+gate,64,16384,2,cosine,True,True,int8,50,"8",0.445878,2.406,6.65,residual krm=64 rbs8
+gate,64,65536,2,cosine,True,True,int8,50,"8",0.433725,2.500,6.40,residual_k=128 rbs8 — beats int2_per_block64
+gate,64,65536,1,cosine,True,True,int8,50,"8",0.483381,1.625,9.85,
+gate,64,65536,3,cosine,True,True,int8,50,"16,8",0.424525,2.879,5.56,residual_k=4096,16
+gate,128,65536,3,cosine,True,True,int8,50,"32,8",0.452580,2.820,5.67,residual_k=4096,16
+gate,32,65536,2,cosine,True,True,int8,50,"8",0.396228,2.258,7.09,krm=16 (broken — old code)
+up,16,512,2,cosine,False,False,bf16,100,,0.510,4.625,3.46,pre-SSVQ residual cb=2
+down,16,512,2,cosine,False,False,bf16,100,,0.093,9.625,1.66,pre-SSVQ residual cb=2

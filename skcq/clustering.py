@@ -296,12 +296,22 @@ def _euclidean_kmeans(
             new_centroids.index_add_(0, chunk_labels, chunk)
             counts.index_add_(0, chunk_labels, torch.ones(end - i, device=device))
 
-        # Handle empty clusters: re-init from random data points
+        # Handle empty clusters: re-init from worst-fit data points
+        # (points furthest from their assigned centroid)
         empty = counts == 0
         n_empty = empty.sum().item()
         if n_empty > 0:
-            reperm = torch.randperm(n, device=data.device)[:n_empty]
-            new_centroids[empty] = data[reperm].to(device)
+            # Compute distance[i] = ||data[i] - centroids[labels[i]]||^2
+            dists = torch.empty(n, device=data.device)
+            for i in range(0, n, chunk_size):
+                end = min(i + chunk_size, n)
+                chunk = data[i:end].to(device)
+                chunk_labels = labels[i:end].to(device)
+                assigned = centroids[chunk_labels]  # (chunk, d)
+                dists[i:end] = ((chunk - assigned) ** 2).sum(dim=-1).to(data.device)
+            # n_empty worst-fit points → re-init from those
+            worst_idx = dists.argsort(descending=True)[:n_empty]
+            new_centroids[empty] = data[worst_idx].to(device)
         new_centroids[~empty] = new_centroids[~empty] / counts[~empty].unsqueeze(-1)
 
         # Check convergence
@@ -372,11 +382,22 @@ def _norm_weighted_spherical_kmeans(
             new_centroids.index_add_(0, chunk_labels, chunk)
             counts.index_add_(0, chunk_labels, torch.ones(end - i, device=device))
 
-        # Handle empty clusters: re-init from Sobol
+        # Handle empty clusters: re-init from worst-fit data points
+        # (points with lowest cosine sim to their assigned centroid)
         empty = counts == 0
         n_empty = empty.sum().item()
         if n_empty > 0:
-            new_centroids[empty] = _sobol_first_orthant(n_empty, d, device)
+            # Compute sim[i] = dot(unit_data[i], centroids[labels[i]])
+            sims = torch.empty(n, device=unit_data.device)
+            for i in range(0, n, chunk_size):
+                end = min(i + chunk_size, n)
+                chunk = unit_data[i:end].to(device)
+                chunk_labels = labels[i:end].to(device)
+                assigned = centroids[chunk_labels]  # (chunk, d)
+                sims[i:end] = torch.einsum('nd,nd->n', chunk, assigned).to(unit_data.device)
+            # n_empty worst-fit points → re-init from those directions
+            worst_idx = sims.argsort()[:n_empty]
+            new_centroids[empty] = unit_data[worst_idx].to(device)
 
         # Normalize to unit sphere
         new_centroids = F.normalize(new_centroids, dim=-1)
