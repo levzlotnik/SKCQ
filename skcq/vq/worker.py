@@ -32,6 +32,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import torch
@@ -352,9 +353,17 @@ def main() -> None:
         tuple(rows_map["down"].shape),
     )
 
-    # Connect to orchestrator
+    # Connect to orchestrator (retry for up to 30s — server may not be up yet)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((host, port))
+    for attempt in range(60):
+        try:
+            sock.connect((host, port))
+            break
+        except (ConnectionError, OSError):
+            if attempt == 59:
+                raise
+            logger.info("Waiting for orchestrator at %s:%d (attempt %d)", host, port, attempt + 1)
+            time.sleep(0.5)
     logger.info("Connected to orchestrator at %s:%d", host, port)
 
     # Send WorkerInfoMessage (device inventory, once)

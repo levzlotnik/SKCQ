@@ -7,6 +7,7 @@ workers:
     venv: cuda/.venv/bin/python
     workdir: "."
     device: cuda
+    chunk_budget_mb: 128    # 12GB VRAM — keep chunks small
 
   # - name: jaguar-strix
   #   host: localhost         # local subprocess, no SSH
@@ -22,9 +23,9 @@ workers:
   #   chunk_budget_mb: 4096   # 512GB UMA — can use large chunks
 
   - name: serval
-    host: serval            # tailscale hostname
+    host: localhost       # this machine
     venv: .venv/bin/python
-    workdir: "~/Projects/SKCQ"
+    workdir: "."
     device: auto
     chunk_budget_mb: 512    # 12GB VRAM — keep chunks small
 

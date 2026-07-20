@@ -337,9 +337,16 @@ class VQOrchestrator:
                 expanded.append(w)
 
         for w in expanded:
-            proc = launch_worker_process(
-                w, self.port, self.orchestrator_host, self.model_id, self.layer
-            )
+            try:
+                proc = launch_worker_process(
+                    w, self.port, self.orchestrator_host, self.model_id, self.layer
+                )
+            except (OSError, FileNotFoundError) as e:
+                logger.error("Failed to launch %s: %s", w["name"], e)
+                ws = self.workers_state.get(w["name"])
+                if ws is not None:
+                    ws.connected = False
+                continue
             self.worker_procs.append(proc)
             ws = self.workers_state.get(w["name"])
             if ws is None:
