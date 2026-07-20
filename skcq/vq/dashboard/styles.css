@@ -196,15 +196,21 @@ fieldset.residual-slot .remove-residual {
 
 /* ---------------------------------------------------------------------------
    Dual-thumb range slider
-   Two overlaid <input type="range"> with a highlighted fill between them.
+   Two overlaid <input type="range"> inside .ds-slider-area, with a label
+   to the right as a flex sibling.
 --------------------------------------------------------------------------- */
 .dual-slider {
-  position: relative;
-  width: 100%;
-  max-width: 320px;
-  height: 24px;
   display: flex;
   align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 400px;
+}
+
+.dual-slider .ds-slider-area {
+  position: relative;
+  flex: 1;
+  height: 24px;
 }
 
 .dual-slider .ds-track {
@@ -271,9 +277,8 @@ fieldset.residual-slot .remove-residual {
 }
 
 .dual-slider .ds-label {
-  margin-left: 10px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13px;
   color: #444;
 }

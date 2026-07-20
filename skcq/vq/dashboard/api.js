@@ -2,8 +2,12 @@
 // No DOM manipulation, no Plotly. Just fetch wrappers + shared constants.
 
 const BLOCK_SIZES = [8, 10, 12, 16, 24, 32, 64, 128];
-const K_VALUES = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
-const FP_DTYPES = ['fp8_e5m2', 'fp8_e4m3', 'fp16', 'bf16', 'fp32'];
+const K_VALUES = [
+    16, 32, 64, 128, 256, 512, 1024, 2048,
+    4096, 8192, 16384, 32768,
+    65536, 131072, 262144, 524288, 1048576,
+];
+const FP_DTYPES = ["fp8_e5m2", "fp8_e4m3", "fp16", "bf16", "fp32"];
 
 function fmtK(v) {
   if (v >= 1048576) return (v / 1048576) + 'M';

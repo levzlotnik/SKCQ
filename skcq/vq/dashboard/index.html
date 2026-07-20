@@ -6,6 +6,7 @@
   <title>VQ Sweep Dashboard</title>
   <link rel="stylesheet" href="styles.css">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
   <script src="api.js" defer></script>
   <script src="ui.js" defer></script>
 </head>
@@ -27,9 +28,7 @@
 
     <div class="field-row">
       <label>Target BPW range:</label>
-      <input id="bpw-min" type="range" min="1.0" max="6.0" step="0.1" value="1.0">
-      <input id="bpw-max" type="range" min="1.0" max="6.0" step="0.1" value="6.0">
-      <span id="bpw-text">[1.0, 6.0]</span>
+      <div id="bpw-range"></div>
     </div>
 
     <fieldset class="codebook-block">
@@ -130,57 +129,28 @@
   </template>
 
   <script>
-  // ---------------------------------------------------------------------------
   // Wiring: event handlers + polling loops.
-  // All rendering/DOM-building lives in ui.js; all fetch lives in api.js.
-  // ---------------------------------------------------------------------------
-  function init() {
+  // ui.js renders from data, api.js fetches.
+  $(() => {
     initRangePanel();
 
-    // BPW slider text
-    document.getElementById('bpw-min').addEventListener('input', updateBpwText);
-    document.getElementById('bpw-max').addEventListener('input', updateBpwText);
+    $('#btn-launch').on('click', () => launchSweep().then(updateStatus));
+    $('#btn-pause').on('click', () => pauseSweep().then(updateStatus));
+    $('#btn-resume').on('click', () => resumeSweep().then(updateStatus));
+    $('#btn-requeue').on('click', () => requeueFailed().then(pollStatus));
+    $('#btn-shutdown').on('click', () => shutdownSweep().then(updateStatus));
+    $('#heatmap-projection').on('change', pollResults);
 
-    // Control buttons
-    document.getElementById('btn-launch').addEventListener('click',
-      () => launchSweep().then(r => updateStatus(r)));
-    document.getElementById('btn-pause').addEventListener('click',
-      () => pauseSweep().then(r => updateStatus(r)));
-    document.getElementById('btn-resume').addEventListener('click',
-      () => resumeSweep().then(r => updateStatus(r)));
-    document.getElementById('btn-requeue').addEventListener('click',
-      () => requeueFailed().then(pollStatus));
-    document.getElementById('btn-shutdown').addEventListener('click',
-      () => shutdownSweep().then(r => updateStatus(r)));
-
-    // Heatmap projection dropdown
-    document.getElementById('heatmap-projection').addEventListener('change', pollResults);
-
-    // Load existing range from server
     loadRangeIntoUI();
 
-    // Start polling
     pollStatus();  setInterval(pollStatus, 2000);
     pollResults(); setInterval(pollResults, 5000);
     pollWorkers(); setInterval(pollWorkers, 5000);
-  }
+  });
 
-  async function pollStatus() {
-    try { updateStatus(await fetchStatus()); } catch (e) {}
-  }
-
-  async function pollResults() {
-    try {
-      const data = await fetchResults();
-      renderResults(data.results || []);
-    } catch (e) {}
-  }
-
-  async function pollWorkers() {
-    try { renderGPUCards(await fetchWorkers()); } catch (e) {}
-  }
-
-  document.addEventListener('DOMContentLoaded', init);
+  async function pollStatus() { try { updateStatus(await fetchStatus()); } catch {} }
+  async function pollResults() { try { renderResults((await fetchResults()).results || []); } catch {} }
+  async function pollWorkers() { try { renderGPUCards(await fetchWorkers()); } catch {} }
   </script>
 
 </body>
