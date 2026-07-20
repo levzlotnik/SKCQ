@@ -153,8 +153,8 @@ def launch_worker_process(
         return subprocess.Popen(cmd, cwd=workdir, env=env)
     else:
         remote = (
-            f"cd {shlex.quote(workdir)} && git pull --quiet && "
-            f"{shlex.quote(venv)} -m skcq.vq.worker " + " ".join(shlex.quote(a) for a in common)
+            f"cd {workdir} && git pull --quiet && "
+            f"{venv} -m skcq.vq.worker " + " ".join(a for a in common)
         )
         return subprocess.Popen(["ssh", "-o", "ConnectTimeout=10", w["host"], remote])
 

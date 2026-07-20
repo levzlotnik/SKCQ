@@ -1,4 +1,4 @@
-orchestrator_host: jaguar   # this machine's tailscale hostname (for remote workers to connect back)
+orchestrator_host: serval   # this machine's tailscale hostname (for remote workers to connect back)
 port: 5555
 
 workers:
