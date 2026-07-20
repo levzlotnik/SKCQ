@@ -326,33 +326,6 @@ def main() -> None:
     # Initialize primary codebook cache
     cache = PrimaryCodebookCache(args.cache_dir) if args.cache_dir else None
 
-    # Load model config + extract layer weights ONCE at startup
-    logger.info("Loading config for %s...", args.model_id)
-    cfg = load_model_config(args.model_id)
-    num_experts = cfg["num_experts"]
-    hidden_size = cfg["hidden_size"]
-    intermediate_size = cfg["moe_intermediate_size"]
-
-    logger.info("Extracting layer %d weights (one-time cost)...", args.layer)
-    model_dir = Path(snapshot_download(args.model_id))
-    layer_shards_map = build_layer_shard_map(model_dir)
-    rows_map = extract_rows(
-        model_dir,
-        args.layer,
-        layer_shards_map,
-        num_experts,
-        hidden_size,
-        intermediate_size,
-    )
-    in_dims = {"gate": hidden_size, "up": hidden_size, "down": intermediate_size}
-    logger.info(
-        "Layer %d loaded: gate=%s, up=%s, down=%s",
-        args.layer,
-        tuple(rows_map["gate"].shape),
-        tuple(rows_map["up"].shape),
-        tuple(rows_map["down"].shape),
-    )
-
     # Connect to orchestrator (retry for up to 30s — server may not be up yet)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     for attempt in range(60):
@@ -378,7 +351,14 @@ def main() -> None:
     heartbeat = HeartbeatThread(sock, args.name, shutdown_event)
     heartbeat.start()
 
-    # Track which projections we've already computed integer baselines for
+    # Weights are loaded lazily on first job — not here. This lets the
+    # dashboard show GPU inventory immediately without waiting for
+    # model download + layer extraction.
+    rows_map: dict[str, torch.Tensor] | None = None
+    in_dims: dict[str, int] = {}
+    num_experts = 0
+    hidden_size = 0
+    intermediate_size = 0
     int_baselines_done: set[str] = set()
 
     try:
@@ -407,6 +387,34 @@ def main() -> None:
                 job.config.primary.K,
                 job.config.n_codebooks,
             )
+
+            # Lazy weight loading: load on first job, not at startup
+            if rows_map is None:
+                logger.info("Loading config for %s...", args.model_id)
+                cfg = load_model_config(args.model_id)
+                num_experts = cfg["num_experts"]
+                hidden_size = cfg["hidden_size"]
+                intermediate_size = cfg["moe_intermediate_size"]
+
+                logger.info("Extracting layer %d weights (one-time cost)...", args.layer)
+                model_dir = Path(snapshot_download(args.model_id))
+                layer_shards_map = build_layer_shard_map(model_dir)
+                rows_map = extract_rows(
+                    model_dir,
+                    args.layer,
+                    layer_shards_map,
+                    num_experts,
+                    hidden_size,
+                    intermediate_size,
+                )
+                in_dims = {"gate": hidden_size, "up": hidden_size, "down": intermediate_size}
+                logger.info(
+                    "Layer %d loaded: gate=%s, up=%s, down=%s",
+                    args.layer,
+                    tuple(rows_map["gate"].shape),
+                    tuple(rows_map["up"].shape),
+                    tuple(rows_map["down"].shape),
+                )
 
             try:
                 # Compute integer baselines once per projection
