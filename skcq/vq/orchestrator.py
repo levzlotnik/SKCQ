@@ -208,6 +208,22 @@ class VQOrchestrator:
         self.worker_procs: list[subprocess.Popen] = []
 
         self._rebuild_queue()
+        self._init_workers_from_yaml()
+
+    def _init_workers_from_yaml(self) -> None:
+        """Pre-populate workers_state from YAML so dashboard shows workers before launch."""
+        raw = load_workers_yaml(self.workers_yaml)
+        for w in raw.get("workers", []):
+            devices = w.get("devices", [])
+            if devices:
+                for dev_idx in devices:
+                    name = f"{w['name']}-gpu{dev_idx}"
+                    ws = WorkerState(name=name, host=w.get("host", "localhost"))
+                    self.workers_state[name] = ws
+            else:
+                name = w["name"]
+                ws = WorkerState(name=name, host=w.get("host", "localhost"))
+                self.workers_state[name] = ws
 
     def _rebuild_queue(self) -> None:
         """Rebuild the job queue from the range, skipping already-done configs."""
@@ -326,9 +342,11 @@ class VQOrchestrator:
                 w, self.port, self.orchestrator_host, self.model_id, self.layer
             )
             self.worker_procs.append(proc)
-            ws = WorkerState(name=w["name"], host=w["host"])
+            ws = self.workers_state.get(w["name"])
+            if ws is None:
+                ws = WorkerState(name=w["name"], host=w["host"])
+                self.workers_state[w["name"]] = ws
             ws.proc = proc
-            self.workers_state[w["name"]] = ws
             logger.info("Launched %s (pid=%d)", w["name"], proc.pid)
 
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -425,6 +443,9 @@ class VQOrchestrator:
 
                     current_job = job_id
                     cfg = self.configs_by_id[job_id]
+                    ws = self.workers_state.get(worker_name)
+                    if ws:
+                        ws.current_job = job_id
                     send_frame(conn, VQJobMessage(config=cfg, layer=self.layer))
 
                 elif isinstance(msg, VQResultsMessage):
@@ -434,6 +455,9 @@ class VQOrchestrator:
                             eid = f"int_baseline_{er.get('scheme', 'unknown')}"
                             insert_row(self.db, er, eid, worker_name)
                     self.completed += 1
+                    ws = self.workers_state.get(worker_name)
+                    if ws:
+                        ws.current_job = None
                     send_frame(conn, AckMessage())
                     current_job = None
                     if self.completed + len(self.failed) >= self.total:
@@ -445,6 +469,9 @@ class VQOrchestrator:
                     if current_job == msg.config_id:
                         self.failed.append(msg.config_id)
                         current_job = None
+                        ws = self.workers_state.get(worker_name)
+                        if ws:
+                            ws.current_job = None
 
         except (ConnectionError, OSError) as e:
             logger.warning("Worker %s connection failed: %s", worker_name, e)

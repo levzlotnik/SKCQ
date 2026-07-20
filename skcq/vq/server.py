@@ -52,7 +52,7 @@ def fetch_results(db: sqlite3.Connection, db_lock: threading.Lock) -> list[dict]
             d["sign_split"] = bool(d["sign_split"])
             try:
                 d["residual_block_sizes"] = json.loads(d.get("residual_block_sizes") or "[]")
-            except TypeError, json.JSONDecodeError:
+            except (TypeError, json.JSONDecodeError):
                 d["residual_block_sizes"] = []
             rows.append(d)
     return rows
@@ -102,6 +102,10 @@ def create_app(orch: VQOrchestrator) -> Flask:
     @app.route("/api.js")
     def api_js():
         return send_file(DASHBOARD_DIR / "api.js", mimetype="application/javascript")
+
+    @app.route("/ui.js")
+    def ui_js():
+        return send_file(DASHBOARD_DIR / "ui.js", mimetype="application/javascript")
 
     @app.route("/api/results")
     def api_results():

@@ -194,6 +194,86 @@ fieldset.residual-slot .remove-residual {
 
 .hidden { display: none; }
 
-input[type="range"] {
-  vertical-align: middle;
+/* ---------------------------------------------------------------------------
+   Dual-thumb range slider
+   Two overlaid <input type="range"> with a highlighted fill between them.
+--------------------------------------------------------------------------- */
+.dual-slider {
+  position: relative;
+  width: 100%;
+  max-width: 320px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+}
+
+.dual-slider .ds-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 4px;
+  background: #ddd;
+  border-radius: 2px;
+}
+
+.dual-slider .ds-fill {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 4px;
+  background: #4a90d9;
+  border-radius: 2px;
+}
+
+.dual-slider input[type="range"] {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  margin: 0;
+  height: 24px;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: none;
+}
+
+.dual-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4a90d9;
+  border: 2px solid white;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  cursor: pointer;
+}
+
+.dual-slider input[type="range"]::-moz-range-thumb {
+  pointer-events: auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4a90d9;
+  border: 2px solid white;
+  cursor: pointer;
+}
+
+.dual-slider input[type="range"]::-moz-range-track {
+  background: transparent;
+}
+
+.dual-slider input[type="range"]::-webkit-slider-runnable-track {
+  background: transparent;
+}
+
+.dual-slider .ds-label {
+  margin-left: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #444;
 }

@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="styles.css">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script src="api.js" defer></script>
+  <script src="ui.js" defer></script>
 </head>
 <body>
 
@@ -48,12 +49,12 @@
 
       <div class="field-row">
         <label>Block size:</label>
-        <div id="primary-block-sizes" class="checkbox-group"></div>
+        <div id="primary-block-sizes"></div>
       </div>
 
       <div class="field-row">
         <label>K:</label>
-        <div id="primary-K" class="checkbox-group"></div>
+        <div id="primary-K"></div>
       </div>
 
       <div id="scale-dtype-section">
@@ -64,13 +65,11 @@
         </div>
         <div id="scale-int-row" class="field-row">
           <label>Bits:</label>
-          <input id="bits-min" type="range" min="2" max="16" step="1" value="2">
-          <input id="bits-max" type="range" min="2" max="16" step="1" value="8">
-          <span id="bits-text">[2, 8]</span>
+          <div id="scale-bits"></div>
         </div>
         <div id="scale-fp-row" class="field-row hidden">
           <label>FP dtypes:</label>
-          <div id="fp-dtypes" class="checkbox-group"></div>
+          <div id="fp-dtypes"></div>
         </div>
       </div>
     </fieldset>
@@ -121,14 +120,68 @@
       <button class="remove-residual" type="button">[×]</button>
       <div class="field-row">
         <label>Block size:</label>
-        <div class="residual-block-sizes checkbox-group"></div>
+        <div class="residual-block-sizes"></div>
       </div>
       <div class="field-row">
         <label>K:</label>
-        <div class="residual-K checkbox-group"></div>
+        <div class="residual-K"></div>
       </div>
     </fieldset>
   </template>
+
+  <script>
+  // ---------------------------------------------------------------------------
+  // Wiring: event handlers + polling loops.
+  // All rendering/DOM-building lives in ui.js; all fetch lives in api.js.
+  // ---------------------------------------------------------------------------
+  function init() {
+    initRangePanel();
+
+    // BPW slider text
+    document.getElementById('bpw-min').addEventListener('input', updateBpwText);
+    document.getElementById('bpw-max').addEventListener('input', updateBpwText);
+
+    // Control buttons
+    document.getElementById('btn-launch').addEventListener('click',
+      () => launchSweep().then(r => updateStatus(r)));
+    document.getElementById('btn-pause').addEventListener('click',
+      () => pauseSweep().then(r => updateStatus(r)));
+    document.getElementById('btn-resume').addEventListener('click',
+      () => resumeSweep().then(r => updateStatus(r)));
+    document.getElementById('btn-requeue').addEventListener('click',
+      () => requeueFailed().then(pollStatus));
+    document.getElementById('btn-shutdown').addEventListener('click',
+      () => shutdownSweep().then(r => updateStatus(r)));
+
+    // Heatmap projection dropdown
+    document.getElementById('heatmap-projection').addEventListener('change', pollResults);
+
+    // Load existing range from server
+    loadRangeIntoUI();
+
+    // Start polling
+    pollStatus();  setInterval(pollStatus, 2000);
+    pollResults(); setInterval(pollResults, 5000);
+    pollWorkers(); setInterval(pollWorkers, 5000);
+  }
+
+  async function pollStatus() {
+    try { updateStatus(await fetchStatus()); } catch (e) {}
+  }
+
+  async function pollResults() {
+    try {
+      const data = await fetchResults();
+      renderResults(data.results || []);
+    } catch (e) {}
+  }
+
+  async function pollWorkers() {
+    try { renderGPUCards(await fetchWorkers()); } catch (e) {}
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+  </script>
 
 </body>
 </html>
