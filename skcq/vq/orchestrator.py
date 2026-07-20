@@ -134,7 +134,7 @@ def launch_worker_process(
 
     common = [
         "--orchestrator",
-        f"{orchestrator_host}:{port}",
+        f"{'localhost' if w['host'] in ('localhost', '127.0.0.1') else orchestrator_host}:{port}",
         "--model-id",
         model_id,
         "--layer",
@@ -251,7 +251,15 @@ class VQOrchestrator:
         self.state = "running"
         self.shutdown.clear()
         self.pause_event.clear()
-        threading.Thread(target=self._run, daemon=True, name="orch").start()
+
+        def _run_wrapper():
+            try:
+                self._run()
+            except Exception:
+                logger.exception("Orchestrator thread crashed")
+                self.state = "idle"
+
+        threading.Thread(target=_run_wrapper, daemon=True, name="orch").start()
         return self.state
 
     def pause(self) -> str:
@@ -320,6 +328,15 @@ class VQOrchestrator:
     # --- TCP server ---
 
     def _run(self) -> None:
+        # Bind TCP server BEFORE launching workers — local workers can
+        # connect within ~1s of weight loading, and the server must be
+        # ready by then. (Old skcq/orchestrator.py does the same.)
+        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_sock.bind(("0.0.0.0", self.port))
+        self.server_sock.listen(16)
+        logger.info("TCP server listening on 0.0.0.0:%d", self.port)
+
         raw_workers = load_workers_yaml(self.workers_yaml)
         workers = raw_workers.get("workers", [])
 
@@ -354,11 +371,6 @@ class VQOrchestrator:
                 self.workers_state[w["name"]] = ws
             ws.proc = proc
             logger.info("Launched %s (pid=%d)", w["name"], proc.pid)
-
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.bind(("0.0.0.0", self.port))
-        self.server_sock.listen(len(expanded) + 4)
 
         threads: list[threading.Thread] = []
         try:

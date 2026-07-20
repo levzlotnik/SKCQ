@@ -3,9 +3,9 @@ port: 5555
 
 workers:
   - name: jaguar-3090
-    host: localhost         # local subprocess, no SSH
+    host: jaguar            # tailscale hostname (remote machine with 3090)
     venv: cuda/.venv/bin/python
-    workdir: "."
+    workdir: "~/Projects/SKCQ"
     device: cuda
     chunk_budget_mb: 128    # 12GB VRAM — keep chunks small
 
