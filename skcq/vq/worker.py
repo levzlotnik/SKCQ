@@ -95,26 +95,24 @@ def _query_gpu_stats_nvidia() -> list[tuple[int, int, int, float]]:
 
 
 def _query_gpu_stats_rocm() -> list[tuple[int, int, int, float]]:
-    """Query rocm-smi for per-GPU stats. Returns [(index, used_mb, total_mb, util_pct)]."""
+    """Query amd-smi for per-GPU stats. Returns [(index, used_mb, total_mb, util_pct)]."""
     try:
         out = subprocess.check_output(
-            ["rocm-smi", "--showmeminfo", "vram", "--showuse", "gpu", "--json"],
+            ["amd-smi", "metric", "-m", "-u", "--json"],
             text=True,
             timeout=5,
         )
 
         data = json.loads(out)
         results = []
-        for key, val in data.items():
-            # rocm-smi keys: "card0", "card1", etc.
-            if key.startswith("card"):
-                idx = int(key[4:])
-                vram_used = val.get("VRAM Total Used Memory (B)", 0)
-                vram_total = val.get("VRAM Total Memory (B)", 0)
-                util = val.get("GPU use (%)", 0)
-                results.append(
-                    (idx, vram_used // (1024 * 1024), vram_total // (1024 * 1024), float(util))
-                )
+        for gpu in data.get("gpu_data", []):
+            idx = gpu["gpu"]
+            mem = gpu.get("mem_usage", {})
+            used = mem.get("used_vram", {}).get("value", 0)
+            total = mem.get("total_vram", {}).get("value", 0)
+            util = gpu.get("usage", {})
+            util_pct = util.get("gfx_activity", {}).get("value", 0) if isinstance(util, dict) else 0
+            results.append((idx, used, total, float(util_pct)))
         return results
     except (FileNotFoundError, subprocess.SubprocessError, ValueError, ImportError):
         return []
