@@ -29,3 +29,4 @@ sweep_logs/
 # POC sandbox
 poc/
 some_math/.lake/
+sweep_results/configs.json
