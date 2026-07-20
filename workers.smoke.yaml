@@ -5,3 +5,4 @@ workers:
     workdir: "."
     device: cuda
     parallelism: 1
+    chunk_budget_mb: 64

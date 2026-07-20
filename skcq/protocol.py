@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from skcq.clustering import CodebookResult
+    from skcq.vq_hyperparams import VQConfig
 
 # Union of all message types. recv_frame returns this or None.
 Message = Union[
@@ -30,6 +31,9 @@ Message = Union[
     "VQJobMessage",
     "VQResultsMessage",
     "VQErrorMessage",
+    "WorkerInfoMessage",
+    "HeartbeatMessage",
+    "DisableMessage",
 ]
 
 
@@ -93,26 +97,19 @@ class DoneMessage:
 
 @dataclass
 class VQJobMessage:
-    """Orch → Worker: hyperparameters for one VQ config.
+    """Orch → Worker: one VQConfig to run.
 
-    Fields match the CLI flags of experiments/weight_quant_error.py.
-    The worker calls run_one_kmeans() directly with these.
+    The config is a structured VQConfig (from skcq.vq_hyperparams), not a
+    bag of CLI args. The worker uses config.primary for the primary codebook
+    and config.residuals for the residual chain. K-means iters and shared
+    codebook flag are sweep-level settings, not per-codebook — they live on
+    the message, not on VQConfig.
     """
 
-    config_id: str
-    projection: str  # "gate" | "up" | "down"
-    block_size: int
-    K: int
-    n_codebooks: int
-    residual_block_sizes: list[int] | None
-    residual_k: list[int] | int | None
-    codebook_bits: int
-    # Fixed sweep hyperparams (echoed for traceability):
-    metric: str  # "cosine"
-    scale_dtype: str  # "int8"
-    kmeans_iters: int
-    shared: bool
-    sign_split: bool
+    config: VQConfig  # forwarded as TYPE_CHECKING import to avoid runtime cycle
+    layer: int
+    kmeans_iters: int = 50
+    shared: bool = True  # always shared in the sweep (single codebook per level)
 
 
 @dataclass
@@ -136,6 +133,60 @@ class VQErrorMessage:
 
     config_id: str
     msg: str
+
+
+# ---------------------------------------------------------------------------
+# Worker inventory + heartbeat (for dashboard GPU monitoring)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DeviceInfo:
+    """One GPU's static info (sent once on worker connect)."""
+
+    index: int  # device index as seen by torch (after HIP/CUDA_VISIBLE_DEVICES filtering)
+    name: str  # "NVIDIA RTX 3090" / "AMD Radeon AI PRO R9700"
+    total_vram_mb: int
+
+
+@dataclass
+class WorkerInfoMessage:
+    """Worker → Orch (once, on connect): worker identity + device inventory."""
+
+    worker_name: str
+    host: str
+    devices: list[DeviceInfo]
+
+
+@dataclass
+class DeviceStats:
+    """One GPU's live stats (sent in every heartbeat)."""
+
+    index: int
+    allocated_mb: int  # PyTorch's view (torch.cuda.memory_allocated)
+    reserved_mb: int  # PyTorch's reserved (torch.cuda.memory_reserved)
+    used_mb: int  # GPU-wide (from nvidia-smi / rocm-smi — includes non-PyTorch)
+    utilization_pct: float  # 0-100, GPU-wide
+
+
+@dataclass
+class HeartbeatMessage:
+    """Worker → Orch (every 5s): per-device live stats."""
+
+    worker_name: str
+    devices: list[DeviceStats]
+
+
+@dataclass
+class DisableMessage:
+    """Orch → Worker: stop accepting new jobs, finish in-flight, exit.
+
+    Sent when user clicks "disable" on a GPU in the dashboard. The worker
+    finishes its current job (if any), sends the result, then exits cleanly
+    to free VRAM. The orchestrator re-queues the in-flight config.
+    """
+
+    pass
 
 
 @dataclass

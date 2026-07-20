@@ -619,6 +619,8 @@ def build_codebook(
     sign_split: bool = False,
     residual_block_sizes: int | list[int] | None = None,
     codebook_bits: int = 16,
+    primary_codebook_cache: object | None = None,
+    cache_key_str: str | None = None,
 ) -> CodebookResult:
     """Build a unit-sphere residual PQ codebook for one projection.
 
@@ -733,20 +735,63 @@ def build_codebook(
             # Pool all blocks' sub-vectors into one (n_rows * cur_n_blocks, cur_bs) tensor
             pooled = unit_residual.reshape(n_rows * cur_n_blocks, cur_bs)
             pooled_raw = raw_residual.reshape(n_rows * cur_n_blocks, cur_bs)
-            result_pool = _cluster_block(
-                pooled,
-                k=k_c,
-                max_iters=params.max_iters,
-                norm_threshold=params.norm_threshold,
-                skip_zeros=params.skip_zeros if c == 0 else False,
-                device=device,
-                name=f"{name} cb={c}/{n_codebooks}",
-                distance_metric=metric,
-                chunk_budget_mb=params.chunk_budget_mb,
-                max_train_samples=2**23,
-                first_orthant=sign_split if c == 0 else False,
-                raw_data=pooled_raw,
-            )
+
+            # Primary codebook caching: if cache is provided and this is the
+            # primary (c==0), try to load a pre-trained codebook. On hit, skip
+            # the expensive k-means and just re-run the assignment step (one
+            # pass of chunk @ cb.t() argmax — much cheaper than full iters).
+            cached_codebook = None
+            if c == 0 and primary_codebook_cache is not None and cache_key_str is not None:
+                from skcq.vq_cache import PrimaryCodebookCache
+
+                if isinstance(primary_codebook_cache, PrimaryCodebookCache):
+                    cached_codebook = primary_codebook_cache.get(cache_key_str)
+
+            if cached_codebook is not None:
+                # Cache hit: re-run assignment only (one pass, much cheaper
+                # than full k-means with iters iterations).
+                cb_to_device = cached_codebook.to(device)
+                # Compute chunk_size from budget (mirrors _cluster_block logic)
+                _budget_bytes = params.chunk_budget_mb * 1024 * 1024
+                _k_eff = max(1, cb_to_device.shape[-1])
+                _chunk = max(1, _budget_bytes // (_k_eff * 4))
+                if metric == "cosine":
+                    labels_full = _assign_to_centroids(
+                        pooled, cb_to_device, _chunk, device
+                    )
+                else:
+                    labels_full = _assign_to_centroids_l2(
+                        pooled, cb_to_device, _chunk, device
+                    )
+                result_pool = BlockClusterResult(
+                    codebook=cb_to_device,
+                    labels=labels_full,
+                    scales=torch.zeros(len(labels_full), device=device),
+                )
+                logger.info("[%s] cb=%d/%d: cache HIT (skipped k-means)", name, c, n_codebooks)
+            else:
+                # Cache miss (or no cache): train k-means
+                result_pool = _cluster_block(
+                    pooled,
+                    k=k_c,
+                    max_iters=params.max_iters,
+                    norm_threshold=params.norm_threshold,
+                    skip_zeros=params.skip_zeros if c == 0 else False,
+                    device=device,
+                    name=f"{name} cb={c}/{n_codebooks}",
+                    distance_metric=metric,
+                    chunk_budget_mb=params.chunk_budget_mb,
+                    max_train_samples=2**23,
+                    first_orthant=sign_split if c == 0 else False,
+                    raw_data=pooled_raw,
+                )
+                # Store primary codebook in cache for future configs
+                if c == 0 and primary_codebook_cache is not None and cache_key_str is not None:
+                    from skcq.vq_cache import PrimaryCodebookCache
+
+                    if isinstance(primary_codebook_cache, PrimaryCodebookCache):
+                        primary_codebook_cache.put(cache_key_str, result_pool.codebook)
+                        logger.info("[%s] cb=%d/%d: cached primary codebook", name, c, n_codebooks)
             # codebook: (cur_bs, K_c) — single shared codebook
             labels_2d = result_pool.labels.reshape(n_rows, cur_n_blocks)
             cb_codebooks.append(result_pool.codebook.unsqueeze(0))  # (1, cur_bs, K_c)

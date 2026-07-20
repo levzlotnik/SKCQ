@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VQ Sweep Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script src="api.js" defer></script>
+</head>
+<body>
+
+  <section id="status-bar">
+    <span id="status-text">State: — | Progress: 0/0 (0%) | Failed: 0 | In queue: 0</span>
+    <div id="status-buttons">
+      <button id="btn-launch">Launch</button>
+      <button id="btn-pause">Pause</button>
+      <button id="btn-resume">Resume</button>
+      <button id="btn-requeue">Requeue failed</button>
+      <button id="btn-shutdown">Shutdown</button>
+    </div>
+  </section>
+
+  <section id="range-panel">
+    <h2>Hyperparameter range</h2>
+
+    <div class="field-row">
+      <label>Target BPW range:</label>
+      <input id="bpw-min" type="range" min="1.0" max="6.0" step="0.1" value="1.0">
+      <input id="bpw-max" type="range" min="1.0" max="6.0" step="0.1" value="6.0">
+      <span id="bpw-text">[1.0, 6.0]</span>
+    </div>
+
+    <fieldset class="codebook-block">
+      <legend>Primary codebook</legend>
+
+      <div class="field-row">
+        <label>Metric:</label>
+        <label><input type="radio" name="primary-metric" value="euclidean"> euclidean</label>
+        <label><input type="radio" name="primary-metric" value="cosine" checked> cosine</label>
+      </div>
+
+      <div class="field-row">
+        <label>Sign split:</label>
+        <label><input type="radio" name="primary-sign-split" value="yes"> yes</label>
+        <label><input type="radio" name="primary-sign-split" value="no" checked> no</label>
+      </div>
+
+      <div class="field-row">
+        <label>Block size:</label>
+        <div id="primary-block-sizes" class="checkbox-group"></div>
+      </div>
+
+      <div class="field-row">
+        <label>K:</label>
+        <div id="primary-K" class="checkbox-group"></div>
+      </div>
+
+      <div id="scale-dtype-section">
+        <div class="field-row">
+          <label>Scale dtype:</label>
+          <label><input type="radio" name="scale-dtype-type" value="int" checked> int</label>
+          <label><input type="radio" name="scale-dtype-type" value="fp"> fp</label>
+        </div>
+        <div id="scale-int-row" class="field-row">
+          <label>Bits:</label>
+          <input id="bits-min" type="range" min="2" max="16" step="1" value="2">
+          <input id="bits-max" type="range" min="2" max="16" step="1" value="8">
+          <span id="bits-text">[2, 8]</span>
+        </div>
+        <div id="scale-fp-row" class="field-row hidden">
+          <label>FP dtypes:</label>
+          <div id="fp-dtypes" class="checkbox-group"></div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="codebook-block">
+      <legend>Residual codebooks</legend>
+      <div id="residuals"></div>
+      <button id="add-residual" type="button">+ Add residual codebook</button>
+    </fieldset>
+
+    <div class="field-row">
+      <button id="apply-range" type="button">Apply</button>
+      <span id="apply-banner" class="banner"></span>
+      <span id="range-estimate"></span>
+    </div>
+  </section>
+
+  <section id="results">
+    <h2>Results</h2>
+
+    <div class="chart-block">
+      <h3>Pareto frontier</h3>
+      <div id="pareto-chart" class="plot"></div>
+    </div>
+
+    <div class="chart-block">
+      <h3>Heatmap (single-codebook kmeans, rel_fro_err)</h3>
+      <label>Projection:
+        <select id="heatmap-projection"></select>
+      </label>
+      <div id="heatmap-chart" class="plot"></div>
+    </div>
+
+    <div class="chart-block">
+      <h3>Best error per BPW bucket</h3>
+      <table id="best-table"></table>
+    </div>
+  </section>
+
+  <section id="gpu-cards-section">
+    <h2>GPUs</h2>
+    <div id="gpu-cards-container"></div>
+  </section>
+
+  <template id="residual-template">
+    <fieldset class="residual-slot">
+      <legend>Residual</legend>
+      <button class="remove-residual" type="button">[×]</button>
+      <div class="field-row">
+        <label>Block size:</label>
+        <div class="residual-block-sizes checkbox-group"></div>
+      </div>
+      <div class="field-row">
+        <label>K:</label>
+        <div class="residual-K checkbox-group"></div>
+      </div>
+    </fieldset>
+  </template>
+
+</body>
+</html>
