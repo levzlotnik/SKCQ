@@ -30,3 +30,5 @@ sweep_logs/
 poc/
 some_math/.lake/
 sweep_results/configs.json
+vq_results/
+vq_cache/
