@@ -4,8 +4,8 @@ Produces a JSON list of configs (CLI arg strings + metadata) for the distributed
 runner. Filters by divisibility, bpw range, and K <= n_rows.
 
 Usage:
-    uv run python scripts/gen_sweep.py --out sweep_results/configs.json
-    uv run python scripts/gen_sweep.py --out sweep_results/configs.json --projection down
+    uv run python scripts/gen_vq_hyperparams.py --out vq_results/configs.json
+    uv run python scripts/gen_vq_hyperparams.py --out vq_results/configs.json --projection down
 """
 
 from __future__ import annotations
@@ -283,7 +283,7 @@ def gen_configs(projection: str) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate sweep config JSON")
-    parser.add_argument("--out", type=Path, default=Path("sweep_results/configs.json"))
+    parser.add_argument("--out", type=Path, default=Path("vq_results/configs.json"))
     parser.add_argument(
         "--projection",
         choices=["gate", "up", "down", "grid", "all"],
@@ -309,7 +309,7 @@ def main() -> None:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w") as f:
-        json.dump(all_configs, f, indent=2)
+        json.dump(all_configs, f, indent=2, separators=(",", ": "))
 
     # Summary
     print(f"\nTotal: {len(all_configs)} configs")

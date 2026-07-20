@@ -27,6 +27,9 @@ Message = Union[
     "ErrorMessage",
     "AckMessage",
     "DoneMessage",
+    "VQJobMessage",
+    "VQResultsMessage",
+    "VQErrorMessage",
 ]
 
 
@@ -77,6 +80,62 @@ class DoneMessage:
     """Orch → Worker: no more jobs, exit."""
 
     pass
+
+
+# ---------------------------------------------------------------------------
+# VQ hyperparameter sweep messages
+# ---------------------------------------------------------------------------
+# A VQ job is ONE config (one projection, one set of hyperparams) — NOT a
+# layer. The worker loads layer weights once at startup, then loops over
+# VQJobMessages, each containing the hyperparameters for one config. Results
+# are flat dicts (CSV row shape), not CodebookResult objects.
+
+
+@dataclass
+class VQJobMessage:
+    """Orch → Worker: hyperparameters for one VQ config.
+
+    Fields match the CLI flags of experiments/weight_quant_error.py.
+    The worker calls run_one_kmeans() directly with these.
+    """
+
+    config_id: str
+    projection: str  # "gate" | "up" | "down"
+    block_size: int
+    K: int
+    n_codebooks: int
+    residual_block_sizes: list[int] | None
+    residual_k: list[int] | int | None
+    codebook_bits: int
+    # Fixed sweep hyperparams (echoed for traceability):
+    metric: str  # "cosine"
+    scale_dtype: str  # "int8"
+    kmeans_iters: int
+    shared: bool
+    sign_split: bool
+
+
+@dataclass
+class VQResultsMessage:
+    """Worker → Orch: results for one VQ config (CSV row shape).
+
+    `extra_rows` carries integer baselines or other auxiliary rows that
+    should be inserted alongside the main result. The orchestrator inserts
+    each as a separate DB row (using each extra row's `scheme` as its
+    config_id suffix).
+    """
+
+    config_id: str
+    row: dict
+    extra_rows: list[dict] | None = None
+
+
+@dataclass
+class VQErrorMessage:
+    """Worker → Orch: VQ config failed."""
+
+    config_id: str
+    msg: str
 
 
 @dataclass

@@ -1,7 +1,0 @@
-workers:
-  - name: jaguar-3090
-    host: localhost
-    venv: cuda/.venv/bin/python
-    workdir: "."
-    device: cuda
-    parallelism: 2
