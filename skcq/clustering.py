@@ -742,10 +742,7 @@ def build_codebook(
             # pass of chunk @ cb.t() argmax — much cheaper than full iters).
             cached_codebook = None
             if c == 0 and primary_codebook_cache is not None and cache_key_str is not None:
-                from skcq.vq_cache import PrimaryCodebookCache
-
-                if isinstance(primary_codebook_cache, PrimaryCodebookCache):
-                    cached_codebook = primary_codebook_cache.get(cache_key_str)
+                cached_codebook = primary_codebook_cache.get(cache_key_str)
 
             if cached_codebook is not None:
                 # Cache hit: re-run assignment only (one pass, much cheaper
@@ -787,11 +784,8 @@ def build_codebook(
                 )
                 # Store primary codebook in cache for future configs
                 if c == 0 and primary_codebook_cache is not None and cache_key_str is not None:
-                    from skcq.vq_cache import PrimaryCodebookCache
-
-                    if isinstance(primary_codebook_cache, PrimaryCodebookCache):
-                        primary_codebook_cache.put(cache_key_str, result_pool.codebook)
-                        logger.info("[%s] cb=%d/%d: cached primary codebook", name, c, n_codebooks)
+                    primary_codebook_cache.put(cache_key_str, result_pool.codebook)
+                    logger.info("[%s] cb=%d/%d: cached primary codebook", name, c, n_codebooks)
             # codebook: (cur_bs, K_c) — single shared codebook
             labels_2d = result_pool.labels.reshape(n_rows, cur_n_blocks)
             cb_codebooks.append(result_pool.codebook.unsqueeze(0))  # (1, cur_bs, K_c)

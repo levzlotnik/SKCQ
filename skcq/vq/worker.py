@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import socket
 import subprocess
@@ -88,7 +89,7 @@ def _query_gpu_stats_nvidia() -> list[tuple[int, int, int, float]]:
                 util = float(parts[3])
                 results.append((idx, used_mb, total_mb, util))
         return results
-    except FileNotFoundError, subprocess.SubprocessError, ValueError:
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError):
         return []
 
 
@@ -100,7 +101,6 @@ def _query_gpu_stats_rocm() -> list[tuple[int, int, int, float]]:
             text=True,
             timeout=5,
         )
-        import json
 
         data = json.loads(out)
         results = []
@@ -115,7 +115,7 @@ def _query_gpu_stats_rocm() -> list[tuple[int, int, int, float]]:
                     (idx, vram_used // (1024 * 1024), vram_total // (1024 * 1024), float(util))
                 )
         return results
-    except FileNotFoundError, subprocess.SubprocessError, ValueError, ImportError:
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError, ImportError):
         return []
 
 
@@ -285,7 +285,7 @@ class HeartbeatThread(threading.Thread):
                 stats = get_device_stats()
                 msg = HeartbeatMessage(worker_name=self.worker_name, devices=stats)
                 send_frame(self.sock, msg)
-            except ConnectionError, OSError:
+            except (ConnectionError, OSError):
                 return
             self.shutdown_event.wait(HEARTBEAT_INTERVAL)
 

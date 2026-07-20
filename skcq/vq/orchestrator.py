@@ -10,6 +10,7 @@ server (skcq.vq.server) wraps this class and adds the control plane API.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -78,8 +79,6 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
 
 def insert_row(conn: sqlite3.Connection, row: dict, config_id: str, worker: str) -> None:
-    import json as _json
-
     safe = {
         "config_id": config_id,
         "projection": str(row.get("projection", "")),
@@ -92,7 +91,7 @@ def insert_row(conn: sqlite3.Connection, row: dict, config_id: str, worker: str)
         "sign_split": 1 if row.get("sign_split") else 0,
         "scale_dtype": str(row.get("scale_dtype", "") or ""),
         "kmeans_iters": int(row.get("kmeans_iters", 0) or 0),
-        "residual_block_sizes": _json.dumps(row.get("residual_block_sizes", []) or []),
+        "residual_block_sizes": json.dumps(row.get("residual_block_sizes", []) or []),
         "rel_fro_err": float(row.get("rel_fro_err", 0.0) or 0.0),
         "bits_per_weight": float(row.get("bits_per_weight", 0.0) or 0.0),
         "compression_ratio": float(row.get("compression_ratio", 0.0) or 0.0),
