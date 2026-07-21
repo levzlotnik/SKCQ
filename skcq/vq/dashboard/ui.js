@@ -478,29 +478,31 @@ function renderHeatmap(results, projection) {
         hovertemplate: "bs=%{y} K=%{x}<br>err=%{z:.6f}<br>bpw=%{text}<extra></extra>",
     }], {
         title: `${projection}: block_size × K → error`,
-        xaxis: { title: "K" },
+        xaxis: { title: "K", type: "log" },
         yaxis: { title: "block_size" },
         height: 420,
     }, { responsive: true });
 }
 
 function renderBestTable(results) {
-    const buckets = [
-        [1.0, 1.5], [1.5, 2.0], [2.0, 2.5], [2.5, 3.0],
-        [3.0, 3.5], [3.5, 4.0], [4.0, 5.0], [5.0, 6.0],
-    ];
+    const buckets = [];
+    for (let b = 1.0; b < 6.0; b += 0.25) {
+        buckets.push([b, b + 0.25]);
+    }
     const projections = [...new Set(results.map(function (r) {
         return r.projection;
     }))].sort();
 
     let html = "<thead><tr><th>bucket</th>";
     for (const p of projections) {
-        html += `<th>${p} km</th><th>${p} int</th><th>winner</th>`;
+        html += `<th>${p} km err</th><th>${p} km config</th>`;
+        html += `<th>${p} int err</th><th>${p} int config</th>`;
+        html += `<th>winner</th>`;
     }
     html += "</tr></thead><tbody>";
 
     for (const [lo, hi] of buckets) {
-        html += `<tr><td>[${lo.toFixed(1)}-${hi.toFixed(1)})</td>`;
+        html += `<tr><td>[${lo.toFixed(2)}-${hi.toFixed(2)})</td>`;
         for (const p of projections) {
             const rows = results.filter(function (r) {
                 return r.projection === p &&
@@ -509,20 +511,39 @@ function renderBestTable(results) {
             });
             const km = rows.filter(isKmeans);
             const ints = rows.filter(function (r) { return !isKmeans(r); });
-            const bk = km.length > 0
-                ? Math.min(...km.map(function (r) { return r.rel_fro_err; }))
-                : null;
-            const bi = ints.length > 0
-                ? Math.min(...ints.map(function (r) { return r.rel_fro_err; }))
-                : null;
+
+            let bkCfg = null, biCfg = null;
+            if (km.length > 0) {
+                bkCfg = km.reduce(function (a, b) {
+                    return a.rel_fro_err < b.rel_fro_err ? a : b;
+                });
+            }
+            if (ints.length > 0) {
+                biCfg = ints.reduce(function (a, b) {
+                    return a.rel_fro_err < b.rel_fro_err ? a : b;
+                });
+            }
+
+            const bk = bkCfg ? bkCfg.rel_fro_err : null;
+            const bi = biCfg ? biCfg.rel_fro_err : null;
 
             html += `<td>${bk !== null ? bk.toFixed(6) : "-"}</td>`;
+            html += `<td>${bkCfg
+                ? `${bkCfg.scheme}<br>bpw=${bkCfg.bits_per_weight.toFixed(3)}`
+                : "-"}</td>`;
             html += `<td>${bi !== null ? bi.toFixed(6) : "-"}</td>`;
+            html += `<td>${biCfg
+                ? `${biCfg.scheme}<br>bpw=${biCfg.bits_per_weight.toFixed(3)}`
+                : "-"}</td>`;
 
             if (bk !== null && bi !== null) {
                 html += bk < bi
                     ? '<td class="winner-kmeans">km</td>'
                     : '<td class="winner-int">int</td>';
+            } else if (bk !== null) {
+                html += '<td class="winner-kmeans">km</td>';
+            } else if (bi !== null) {
+                html += '<td class="winner-int">int</td>';
             } else {
                 html += "<td>-</td>";
             }
