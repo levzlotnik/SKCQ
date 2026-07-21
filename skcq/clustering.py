@@ -738,8 +738,14 @@ def build_codebook(
         cur_bs = bs_per_codebook[c]
         cur_n_blocks = in_dim // cur_bs
 
-        # Reshape residual to current block size if needed
+        # Reshape residual to current block size if needed.
+        # Each codebook partitions in_dim into its own blocks; if cur_bs
+        # doesn't divide in_dim, the leftover columns are dropped (they
+        # were already stored as bf16 remainder by the primary).
         if cur_bs != unit_residual.shape[2]:
+            cur_quant_dim = cur_n_blocks * cur_bs
+            unit_residual = unit_residual.reshape(n_rows, -1)[:, :cur_quant_dim]
+            raw_residual = raw_residual.reshape(n_rows, -1)[:, :cur_quant_dim]
             unit_residual = unit_residual.reshape(n_rows, cur_n_blocks, cur_bs)
             raw_residual = raw_residual.reshape(n_rows, cur_n_blocks, cur_bs)
 
