@@ -360,9 +360,10 @@ function paretoFrontier(rows) {
 function renderPareto(results) {
     const projections = [...new Set(results.map(function (r) {
         return r.projection;
-    }))];
+    }))].sort();
     const traces = [];
 
+    let kmeansTraceSeen = false;
     for (const proj of projections) {
         const projRows = results.filter(function (r) {
             return r.projection === proj;
@@ -373,6 +374,12 @@ function renderPareto(results) {
         });
 
         if (km.length > 0) {
+            // Only the first kmeans trace carries the colorbar — block_size is
+            // a shared axis across projections, so emitting one colorbar per
+            // projection piles them up on the right edge and they collide
+            // with the legend (the bug this fixes).
+            const showscale = !kmeansTraceSeen;
+            kmeansTraceSeen = true;
             traces.push({
                 x: km.map(function (r) { return r.bits_per_weight; }),
                 y: km.map(function (r) { return r.rel_fro_err; }),
@@ -388,8 +395,8 @@ function renderPareto(results) {
                     }),
                     color: km.map(function (r) { return r.block_size; }),
                     colorscale: "Viridis",
-                    showscale: true,
-                    colorbar: { title: "block_size" },
+                    showscale: showscale,
+                    colorbar: showscale ? { title: "block_size" } : undefined,
                     opacity: 0.7,
                 },
                 hovertemplate: "%{text}<extra></extra>",
@@ -469,7 +476,7 @@ function renderHeatmap(results, projection) {
     Plotly.newPlot("heatmap-chart", [{
         z: z,
         x: kVals.map(function (K) { return Math.log2(K); }),
-        y: bsVals.map(String),
+        y: bsVals.map(function (bs) { return Math.log2(bs); }),
         type: "heatmap",
         colorscale: "Viridis_r",
         colorbar: { title: "error" },
@@ -484,7 +491,11 @@ function renderHeatmap(results, projection) {
             tickvals: kVals.map(function (K) { return Math.log2(K); }),
             ticktext: kVals.map(fmtK),
         },
-        yaxis: { title: "block_size" },
+        yaxis: {
+            title: "block_size",
+            tickvals: bsVals.map(function (bs) { return Math.log2(bs); }),
+            ticktext: bsVals.map(String),
+        },
         height: 420,
     }, { responsive: true });
 }

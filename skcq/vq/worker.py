@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -126,6 +127,36 @@ def _query_gpu_stats() -> list[tuple[int, int, int, float]]:
     return _query_gpu_stats_rocm()
 
 
+def _physical_device_index(logical_idx: int) -> int:
+    """Map a PyTorch-visible device index to its physical GPU index.
+
+    PyTorch exposes only the devices that HIP_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES
+    allow this process to see. When the process is pinned to one GPU via these env
+    vars (see usage at the top of this module), ``torch.cuda.device_count() == 1``
+    and the loop in ``get_device_stats`` always sees ``i = 0``. But the smi
+    subprocess ignores these vars and always lists all physical GPUs in physical
+    order, so indexing it with the logical ``i`` would silently report the wrong
+    GPU's utilization (the symptom that prompted this fix).
+
+    Returns the physical index that ``logical_idx`` corresponds to under the
+    current env-var remapping. If no *_VISIBLE_DEVICES is set, the mapping is the
+    identity, so this is a no-op for the single-GPU un-pinned case.
+    """
+    env = os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not env or env == "all":
+        return logical_idx
+    # Both vars accept a comma-separated list of physical indices (no spaces,
+    # no ranges in the HIP/CUDA spec) and remap them in order: env index 0 ->
+    # first listed physical GPU, env index 1 -> second, etc.
+    try:
+        physical = [int(s) for s in env.split(",") if s.strip() != ""]
+    except ValueError:
+        return logical_idx
+    if 0 <= logical_idx < len(physical):
+        return physical[logical_idx]
+    return logical_idx
+
+
 def get_device_inventory() -> list[DeviceInfo]:
     """Get static device info (called once on startup)."""
     devices = []
@@ -149,13 +180,17 @@ def get_device_stats() -> list[DeviceStats]:
     for i in range(pytorch_count):
         alloc_mb = int(torch.cuda.memory_allocated(i) / (1024 * 1024))
         reserved_mb = int(torch.cuda.memory_reserved(i) / (1024 * 1024))
-        # Match GPU-wide stats by index (works when HIP/CUDA_VISIBLE_DEVICES
-        # hasn't remapped indices — within this process, device 0 = the one
-        # we were pinned to)
+        # Translate this process's logical device index (which PyTorch sees after
+        # the *_VISIBLE_DEVICES filter) back to the physical index that the smi
+        # subprocess uses. Without this, a process pinned to physical GPU 1 with
+        # HIP_VISIBLE_DEVICES=1 would still report physical GPU 0's stats,
+        # because it sees its only device as index 0 and the smi list is in
+        # physical order.
+        physical_idx = _physical_device_index(i)
         used_mb = alloc_mb
         util = 0.0
-        if i < len(gpu_stats):
-            _, used_mb, _, util = gpu_stats[i]
+        if 0 <= physical_idx < len(gpu_stats):
+            _, used_mb, _, util = gpu_stats[physical_idx]
         stats.append(
             DeviceStats(
                 index=i,
