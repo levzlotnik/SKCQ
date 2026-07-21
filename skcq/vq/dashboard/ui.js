@@ -578,10 +578,16 @@ function renderGPUCards(workers) {
 
         const vramStr = dev
             ? `${bar} ${usedVram} / ${totalVram} MB`
-            : "Waiting for connection...";
+            : (w.enabled ? "Connecting..." : "Disabled");
 
-        const dotClass = w.connected ? "connected" : "";
+        // 3 states: gray (disabled), orange (enabled but not connected), green (connected)
+        let dotClass = "";
         const toggleLabel = w.enabled ? "Disable" : "Enable";
+        if (w.connected) {
+            dotClass = "connected";      // green
+        } else if (w.enabled) {
+            dotClass = "connecting";     // orange
+        }  // else gray (no class)
 
         const $card = $('<div class="gpu-card">');
 

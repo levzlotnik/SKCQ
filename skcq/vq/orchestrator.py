@@ -206,25 +206,6 @@ class VQOrchestrator:
         self.worker_procs: list[subprocess.Popen] = []
 
         self._rebuild_queue()
-        self._init_workers_from_yaml()
-
-    def _init_workers_from_yaml(self) -> None:
-        """Pre-populate workers_state from YAML so dashboard shows workers before launch.
-        All workers start disabled — user enables them manually via dashboard."""
-        raw = load_workers_yaml(self.workers_yaml)
-        for w in raw.get("workers", []):
-            devices = w.get("devices", [])
-            if devices:
-                for dev_idx in devices:
-                    name = f"{w['name']}-gpu{dev_idx}"
-                    ws = WorkerState(name=name, host=w.get("host", "localhost"))
-                    ws.enabled = False
-                    self.workers_state[name] = ws
-            else:
-                name = w["name"]
-                ws = WorkerState(name=name, host=w.get("host", "localhost"))
-                ws.enabled = False
-                self.workers_state[name] = ws
 
     def _rebuild_queue(self) -> None:
         """Rebuild the job queue from the range, skipping already-done configs."""
@@ -247,52 +228,40 @@ class VQOrchestrator:
     # --- control plane ---
 
     def start(self) -> None:
-        """Bind TCP server + launch worker processes. Called once at startup,
-        before any jobs are dispatched. Workers connect and sit idle waiting
-        for ReadyMessage acknowledgments until launch() is called."""
+        """Bind TCP server + start accept loop. Called once at startup.
+        Does NOT launch worker processes — user enables workers individually
+        via the dashboard."""
+        # Load + expand worker configs from YAML (for enable_worker)
+        raw_workers = load_workers_yaml(self.workers_yaml)
+        workers = raw_workers.get("workers", [])
+
+        self._worker_configs = {}
+        for w in workers:
+            devices = w.get("devices", [])
+            if devices:
+                for dev_idx in devices:
+                    w2 = dict(w)
+                    name = f"{w['name']}-gpu{dev_idx}"
+                    w2["name"] = name
+                    w2["devices"] = [dev_idx]
+                    self._worker_configs[name] = w2
+            else:
+                self._worker_configs[w["name"]] = dict(w)
+
+        # All workers start disabled (gray)
+        for name in self._worker_configs:
+            if name not in self.workers_state:
+                self.workers_state[name] = WorkerState(
+                    name=name, host=self._worker_configs[name].get("host", "localhost")
+                )
+
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_sock.bind(("0.0.0.0", self.port))
         self.server_sock.listen(16)
         logger.info("TCP server listening on 0.0.0.0:%d", self.port)
 
-        # Launch worker processes — they connect and wait for jobs
-        raw_workers = load_workers_yaml(self.workers_yaml)
-        workers = raw_workers.get("workers", [])
-
-        expanded = []
-        for w in workers:
-            devices = w.get("devices", [])
-            if devices:
-                for dev_idx in devices:
-                    w2 = dict(w)
-                    w2["name"] = f"{w['name']}-gpu{dev_idx}"
-                    w2["devices"] = [dev_idx]
-                    expanded.append(w2)
-            else:
-                expanded.append(w)
-
-        for w in expanded:
-            try:
-                proc = launch_worker_process(
-                    w, self.port, self.orchestrator_host, self.model_id, self.layer
-                )
-            except (OSError, FileNotFoundError) as e:
-                logger.error("Failed to launch %s: %s", w["name"], e)
-                ws = self.workers_state.get(w["name"])
-                if ws is not None:
-                    ws.connected = False
-                continue
-            self.worker_procs.append(proc)
-            ws = self.workers_state.get(w["name"])
-            if ws is None:
-                ws = WorkerState(name=w["name"], host=w["host"])
-                self.workers_state[w["name"]] = ws
-            ws.proc = proc
-            logger.info("Launched %s (pid=%d)", w["name"], proc.pid)
-
-        # Accept worker connections in background (they connect immediately,
-        # send WorkerInfoMessage + heartbeats, then wait for ReadyMessage)
+        # Accept worker connections in background
         threading.Thread(target=self._accept_loop, daemon=True, name="accept").start()
 
     def _accept_loop(self) -> None:
@@ -371,23 +340,54 @@ class VQOrchestrator:
         return self.state
 
     def enable_worker(self, name: str) -> str:
+        """Launch the worker process for this GPU (gray → orange → green)."""
         ws = self.workers_state.get(name)
         if ws is None:
             return f"unknown worker: {name}"
+        if ws.proc is not None and ws.proc.poll() is None:
+            return "already running"
+        cfg = self._worker_configs.get(name)
+        if cfg is None:
+            return f"no config for {name}"
+        try:
+            proc = launch_worker_process(
+                cfg, self.port, self.orchestrator_host, self.model_id, self.layer
+            )
+        except (OSError, FileNotFoundError) as e:
+            logger.error("Failed to launch %s: %s", name, e)
+            return f"launch failed: {e}"
+        ws.proc = proc
         ws.enabled = True
+        ws.connected = False
+        self.worker_procs.append(proc)
+        logger.info("Launched %s (pid=%d)", name, proc.pid)
         return "enabled"
 
     def disable_worker(self, name: str) -> str:
+        """Kill the worker process for this GPU, re-queue in-flight job."""
         ws = self.workers_state.get(name)
         if ws is None:
             return f"unknown worker: {name}"
         ws.enabled = False
+        # Re-queue in-flight job
+        if ws.current_job:
+            self.job_queue.put(ws.current_job)
+            ws.current_job = None
+        # Tell worker to exit cleanly (finish in-flight, send result, exit)
         if ws.conn and ws.connected:
             try:
                 send_frame(ws.conn, DisableMessage())
             except OSError:
                 ws.connected = False
                 logger.debug("Worker %s already disconnected during disable", name)
+        # Kill the process
+        if ws.proc is not None and ws.proc.poll() is None:
+            ws.proc.terminate()
+            try:
+                ws.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                ws.proc.kill()
+        ws.connected = False
         return "disabled"
 
     # --- TCP server ---

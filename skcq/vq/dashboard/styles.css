@@ -166,6 +166,7 @@ fieldset.residual-slot .remove-residual {
 }
 
 .gpu-card .status-dot.connected { background: #4caf50; }
+.gpu-card .status-dot.connecting { background: #ff9800; }
 
 .gpu-card .toggle-btn {
   margin-left: auto;
