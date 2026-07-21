@@ -122,7 +122,9 @@ def create_app(orch: VQOrchestrator) -> Flask:
     @app.route("/api/range", methods=["POST"])
     def api_set_range():
         orch.range = VQHyperparamRange.from_dict(json.loads(request.data))
-        return jsonify({"applied": "next_sweep", "est_configs": len(orch.range)})
+        orch._rebuild_queue()
+        return jsonify({"applied": "now", "est_configs": len(orch.range),
+                        "total": orch.total, "in_queue": orch.job_queue.qsize()})
 
     @app.route("/api/workers")
     def api_workers():
