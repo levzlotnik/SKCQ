@@ -130,6 +130,7 @@ def launch_worker_process(
     name = w["name"]
     venv = w["venv"]
     workdir = w.get("workdir", ".")
+    devices = w.get("devices", [])
 
     common = [
         "--orchestrator",
@@ -146,14 +147,30 @@ def launch_worker_process(
         str(chunk_mb),
     ]
 
+    # GPU pinning: if devices is [idx], pin the worker to that physical GPU
+    # via env vars. CUDA_VISIBLE_DEVICES for NVIDIA, HIP_VISIBLE_DEVICES for
+    # ROCm (which also exposes as cuda in torch). Both set so the worker
+    # sees only one GPU, and cuda:0 = the assigned physical device.
+    if len(devices) == 1:
+        dev_idx = devices[0]
+        gpu_env = {
+            "CUDA_VISIBLE_DEVICES": str(dev_idx),
+            "HIP_VISIBLE_DEVICES": str(dev_idx),
+        }
+    else:
+        gpu_env = {}
+
     if w["host"] in ("localhost", "127.0.0.1"):
         cmd = [venv, "-m", "skcq.vq.worker", *common]
-        env = {**os.environ, "PYTHONPATH": str(REPO)}
+        env = {**os.environ, "PYTHONPATH": str(REPO), **gpu_env}
         return subprocess.Popen(cmd, cwd=workdir, env=env)
     else:
+        env_prefix = " ".join(f"{k}={v}" for k, v in gpu_env.items())
+        if env_prefix:
+            env_prefix += " "
         remote = (
             f"cd {workdir} && git pull --quiet && "
-            f"{venv} -m skcq.vq.worker " + " ".join(a for a in common)
+            f"{env_prefix}{venv} -m skcq.vq.worker " + " ".join(a for a in common)
         )
         return subprocess.Popen(["ssh", "-o", "ConnectTimeout=10", w["host"], remote])
 
