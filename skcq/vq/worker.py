@@ -90,7 +90,7 @@ def _query_gpu_stats_nvidia() -> list[tuple[int, int, int, float]]:
                 util = float(parts[3])
                 results.append((idx, used_mb, total_mb, util))
         return results
-    except (FileNotFoundError, subprocess.SubprocessError, ValueError):
+    except FileNotFoundError, subprocess.SubprocessError, ValueError:
         return []
 
 
@@ -114,7 +114,7 @@ def _query_gpu_stats_rocm() -> list[tuple[int, int, int, float]]:
             util_pct = util.get("gfx_activity", {}).get("value", 0) if isinstance(util, dict) else 0
             results.append((idx, used, total, float(util_pct)))
         return results
-    except (FileNotFoundError, subprocess.SubprocessError, ValueError, ImportError):
+    except FileNotFoundError, subprocess.SubprocessError, ValueError, ImportError:
         return []
 
 
@@ -228,6 +228,7 @@ def process_vq_job(
     primary = cfg.primary
     residual_block_sizes = [r.block_size for r in cfg.residuals] if cfg.residuals else None
     residual_k = [r.K for r in cfg.residuals] if cfg.residuals else None
+    residual_sign_split = [bool(r.sign_split) for r in cfg.residuals] if cfg.residuals else None
     metric = primary.metric or "cosine"
     scale_dtype = primary.scale_dtype or "bf16"
     sign_split = bool(primary.sign_split) if primary.sign_split is not None else False
@@ -249,6 +250,7 @@ def process_vq_job(
         n_codebooks=cfg.n_codebooks,
         metric=metric,
         residual_k=residual_k,
+        residual_sign_split=residual_sign_split,
         shared_codebook=job.shared,
         sign_split=sign_split,
         max_iters=job.kmeans_iters,
@@ -284,7 +286,7 @@ class HeartbeatThread(threading.Thread):
                 stats = get_device_stats()
                 msg = HeartbeatMessage(worker_name=self.worker_name, devices=stats)
                 send_frame(self.sock, msg)
-            except (ConnectionError, OSError):
+            except ConnectionError, OSError:
                 return
             self.shutdown_event.wait(HEARTBEAT_INTERVAL)
 
@@ -330,7 +332,7 @@ def main() -> None:
         try:
             sock.connect((host, port))
             break
-        except (ConnectionError, OSError):
+        except ConnectionError, OSError:
             if attempt == 59:
                 raise
             logger.info("Waiting for orchestrator at %s:%d (attempt %d)", host, port, attempt + 1)

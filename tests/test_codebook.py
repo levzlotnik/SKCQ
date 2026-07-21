@@ -78,15 +78,21 @@ def _codebook_contrib(
 
 
 def _manual_forward(module: CodebookModule, hidden: torch.Tensor, expert_idx: int) -> torch.Tensor:
-    """Reference: sum codebook contributions per block, apply scale, sum over blocks (PQ)."""
+    """Reference (new scheme): primary scaled per block, residuals unscaled, + remainders."""
     n_tokens = hidden.shape[0]
-    hidden_blocked = hidden.reshape(n_tokens, module.n_blocks, module.block_size)
-    logits = torch.zeros(module.n_blocks, n_tokens, module.out_dim)
-    logits = logits + _codebook_contrib(module.primary, hidden_blocked, expert_idx)
+    p = module.primary
+    cov_p = p.n_blocks * p.block_size
+    hp = hidden[:, :cov_p].reshape(n_tokens, p.n_blocks, p.block_size)
+    plogits = _codebook_contrib(p, hp, expert_idx)  # (n_blocks, tokens, out_dim)
+    scale = p.scales[expert_idx]  # (n_blocks, out_dim)
+    out = (plogits * scale.unsqueeze(1)).sum(dim=0)
+    out = out + hidden[:, cov_p:] @ p.remainder[expert_idx].mT
     for cb in module.additives:
-        logits = logits + _codebook_contrib(cb, hidden_blocked, expert_idx)
-    scale = module.primary.scales[expert_idx]  # (n_blocks, out_dim)
-    return (logits * scale.unsqueeze(1)).sum(dim=0)
+        cov_c = cb.n_blocks * cb.block_size
+        hc = hidden[:, :cov_c].reshape(n_tokens, cb.n_blocks, cb.block_size)
+        out = out + _codebook_contrib(cb, hc, expert_idx).sum(dim=0)
+        out = out + hidden[:, cov_c:] @ cb.remainder[expert_idx].mT
+    return out
 
 
 class TestCodebookModuleForward:
@@ -180,44 +186,37 @@ class TestBuildCodebook:
         assert result.n_blocks == N_BLOCKS
         assert result.n_codebooks == N_CODEBOOKS
 
-    def test_in_dim_not_divisible_raises(self) -> None:
-        rows = torch.randn(8, 13)  # 13 not divisible by 3
-        try:
-            build_codebook(
-                rows,
-                params=self._params(),
-                k=K,
-                n_blocks=3,
-                n_codebooks=1,
-                num_experts=1,
-                out_dim=8,
-                device=torch.device("cpu"),
-                name="bad",
-            )
-        except ValueError as e:
-            assert "not divisible" in str(e)
-        else:
-            raise AssertionError("expected ValueError")
+    def test_in_dim_not_divisible_builds_remainder(self) -> None:
+        """Non-dividing primary block size now builds a remainder (no raise)."""
+        rows = torch.randn(8, 13)  # 13 not divisible by 3 -> bs_0=4, cov=12, rem=1
+        result = build_codebook(
+            rows,
+            params=self._params(),
+            k=K,
+            n_blocks=3,
+            n_codebooks=1,
+            num_experts=1,
+            out_dim=8,
+            device=torch.device("cpu"),
+            name="rem",
+        )
+        assert result.block_sizes == [4]
+        assert result.remainders is not None
+        assert result.remainders[0] is not None
+        assert result.remainders[0].shape == (8, 1)
+        recon = result.reconstruct()
+        assert recon.shape == (8, 13)
+        # Remainder column reconstructed exactly.
+        assert torch.allclose(recon[:, 12:].float(), rows[:, 12:].float(), atol=1e-2)
 
     def _reconstruct_error(
         self, result: CodebookResult, rows: torch.Tensor, expert_idx: int
     ) -> float:
-        n_rows = NUM_EXPERTS * OUT_DIM
-        w = rows.reshape(NUM_EXPERTS, OUT_DIM, IN_DIM)
-        recon = torch.zeros(OUT_DIM, IN_DIM)
-        for b in range(result.n_blocks):
-            final_dir = torch.zeros(n_rows, BLOCK_SIZE)
-            for c in range(result.n_codebooks):
-                cb = result.codebooks[c][b]
-                asgn = result.assignments[c][b]  # (n_rows,)
-                final_dir = final_dir + cb.t()[asgn]
-            scale = result.scales[:, b]  # (n_rows,)
-            recon_block = scale.unsqueeze(-1) * final_dir
-            recon[:, b * BLOCK_SIZE : (b + 1) * BLOCK_SIZE] = (
-                recon[:, b * BLOCK_SIZE : (b + 1) * BLOCK_SIZE]
-                + recon_block.reshape(NUM_EXPERTS, OUT_DIM, BLOCK_SIZE)[expert_idx]
-            )
-        return (w[expert_idx] - recon).norm().item()
+        recon = result.reconstruct()  # (n_rows, in_dim)
+        in_dim = rows.shape[1]
+        w = rows.reshape(NUM_EXPERTS, OUT_DIM, in_dim)
+        r = recon.reshape(NUM_EXPERTS, OUT_DIM, in_dim)
+        return (w[expert_idx].float() - r[expert_idx]).norm().item()
 
     def test_residual_reduces_error(self) -> None:
         torch.manual_seed(42)
@@ -272,10 +271,9 @@ class TestBuildCodebook:
         # Other rows should generally have non-zero scales
         assert result.scales[1, :].abs().sum() > 0
 
-    def test_unit_sphere_residual(self) -> None:
-        """cb1 operates on the unit-sphere residual (unit - centroid_0), not raw residual."""
+    def test_real_error_residual(self) -> None:
+        """cb1 operates on the REAL error (W - recon_0), euclidean, magnitude included."""
         torch.manual_seed(0)
-        # Large magnitude so raw-residual norms clearly exceed unit-sphere residual norms.
         rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 10.0
         params = self._params(n_codebooks=2, max_iters=50)
         result = build_codebook(
@@ -287,42 +285,36 @@ class TestBuildCodebook:
             num_experts=NUM_EXPERTS,
             out_dim=OUT_DIM,
             device=torch.device("cpu"),
-            name="usr",
+            name="real",
         )
         n_rows = NUM_EXPERTS * OUT_DIM
+        raw_blocks = rows.float().reshape(n_rows, N_BLOCKS, BLOCK_SIZE)
         unit = F.normalize(rows.float(), dim=-1)
         unit_blocks = unit.reshape(n_rows, N_BLOCKS, BLOCK_SIZE)
-        raw_blocks = rows.float().reshape(n_rows, N_BLOCKS, BLOCK_SIZE)
 
-        new_res = unit_blocks.clone()
-        raw_res = raw_blocks.clone()
+        # Primary reconstruction (from result's primary centroids + scales).
+        primary_recon = torch.zeros(n_rows, N_BLOCKS, BLOCK_SIZE)
         for b in range(N_BLOCKS):
             cb0 = result.codebooks[0][b]  # (BLOCK_SIZE, K)
-            asgn0 = result.assignments[0][b]  # (n_rows,)
-            centroid0 = cb0.t()[asgn0]  # (n_rows, BLOCK_SIZE) — unit-norm (spherical)
-            # New scheme: residual = unit - centroid_0
-            new_res[:, b, :] = new_res[:, b, :] - centroid0
-            # Old scheme: residual = raw - scale_0 * centroid_0
-            scale0 = (raw_blocks[:, b, :] * centroid0).sum(dim=-1)
-            raw_res[:, b, :] = raw_res[:, b, :] - scale0.unsqueeze(-1) * centroid0
+            dir0 = cb0.t()[result.assignments[0][b]]  # (n_rows, BLOCK_SIZE)
+            primary_recon[:, b, :] = result.scales[:, b].unsqueeze(-1) * dir0
 
-        # cb0 centroids must be unit-norm (spherical k-means)
-        for b in range(N_BLOCKS):
-            norms = result.codebooks[0][b].t().norm(dim=-1)
-            assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
+        real_error = raw_blocks - primary_recon  # E_1 = W - recon_0
+        unit_residual = unit_blocks - primary_recon / (primary_recon.norm() + 1e-9)
 
-        # cb1 should reconstruct the unit-sphere residual, NOT the raw residual
+        # cb1 centroids should fit the REAL error, not a unit-sphere residual.
         new_err = 0.0
-        raw_err = 0.0
+        unit_err = 0.0
         for b in range(N_BLOCKS):
-            cb1 = result.codebooks[1][b]  # (BLOCK_SIZE, K1)
-            asgn1 = result.assignments[1][b]
-            centroid1 = cb1.t()[asgn1]
-            new_err += (new_res[:, b, :] - centroid1).norm(dim=-1).mean().item()
-            raw_err += (raw_res[:, b, :] - centroid1).norm(dim=-1).mean().item()
-        assert new_err < raw_err / 5, (
-            f"cb1 should fit unit-sphere residual: new_err={new_err} raw_err={raw_err}"
+            cb1 = result.codebooks[1][b]
+            centroid1 = cb1.t()[result.assignments[1][b]]
+            new_err += (real_error[:, b, :] - centroid1).norm(dim=-1).mean().item()
+            unit_err += (unit_residual[:, b, :] - centroid1).norm(dim=-1).mean().item()
+        assert new_err < unit_err, (
+            f"cb1 should fit real error: new_err={new_err} unit_err={unit_err}"
         )
+        # Euclidean centroids carry magnitude (not unit-sphere ~O(1)).
+        assert result.codebooks[1].norm(dim=1).mean().item() > 1.0
 
     def test_asymmetric_k(self) -> None:
         rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.1
@@ -363,7 +355,7 @@ class TestBuildCodebook:
         assert result.scales.shape == (NUM_EXPERTS * OUT_DIM, N_BLOCKS)
 
     def test_scale_refit(self) -> None:
-        """scale = dot(raw, final_direction)/||final_direction||^2 (not just cb0 projection)."""
+        """Re-fit scale is the LS optimum: residual is orthogonal to the primary direction."""
         torch.manual_seed(7)
         rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.1
         result = build_codebook(
@@ -378,29 +370,359 @@ class TestBuildCodebook:
             name="refit",
         )
         n_rows = NUM_EXPERTS * OUT_DIM
-        raw_blocks = rows.float().reshape(n_rows, N_BLOCKS, BLOCK_SIZE)
+        raw = rows.float()
+        recon = result.reconstruct()
         for b in range(N_BLOCKS):
-            final_dir = torch.zeros(n_rows, BLOCK_SIZE)
-            for c in range(result.n_codebooks):
-                cb = result.codebooks[c][b]
-                asgn = result.assignments[c][b]
-                final_dir = final_dir + cb.t()[asgn]
-            expected = (raw_blocks[:, b, :] * final_dir).sum(dim=-1) / (
-                final_dir.norm(dim=-1) ** 2 + 1e-10
-            )
-            actual = result.scales[:, b]
-            assert torch.allclose(actual.float(), expected, atol=1e-4)
+            cols = slice(b * BLOCK_SIZE, (b + 1) * BLOCK_SIZE)
+            dir_b = result.codebooks[0][b].t()[result.assignments[0][b]]  # (n_rows, bs)
+            resid = raw[:, cols] - recon[:, cols]
+            # LS optimum => residual orthogonal to primary direction.
+            dot = torch.einsum("nd,nd->n", resid, dir_b)
+            assert dot.abs().max().item() < 1e-3, f"block {b} not orthogonal: {dot.abs().max()}"
+        assert result.scales.shape == (n_rows, N_BLOCKS)
 
-        # Also confirm the refit scale differs from the naive cb0-only projection scale,
-        # i.e. the scale actually accounts for the final (multi-codebook) direction.
-        naive_scale = torch.zeros(n_rows)
-        for b in range(N_BLOCKS):
-            cb0 = result.codebooks[0][b]
-            asgn0 = result.assignments[0][b]
-            c0 = cb0.t()[asgn0]
-            naive_scale = naive_scale + (raw_blocks[:, b, :] * c0).sum(dim=-1)
-        actual_flat = result.scales.sum(dim=1)
-        assert not torch.allclose(actual_flat.float(), naive_scale, atol=1e-4)
+    def test_residual_bs_not_dividing_reconstructs_remainder(self) -> None:
+        """A residual block size that does not divide in_dim reconstructs its remainder."""
+        torch.manual_seed(3)
+        in_dim = 12  # primary bs=4 divides; residual bs=5 -> cov=10, rem=2
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, in_dim) * 0.1
+        params = self._params(n_codebooks=2, residual_block_sizes=5)
+        result = build_codebook(
+            rows,
+            params,
+            k=K,
+            n_blocks=3,
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="resrem",
+        )
+        assert result.block_sizes == [4, 5]
+        assert result.remainders is not None
+        assert result.remainders[1] is not None
+        assert result.remainders[1].shape == (NUM_EXPERTS * OUT_DIM, 2)
+        recon = result.reconstruct()  # must not raise
+        assert recon.shape == (NUM_EXPERTS * OUT_DIM, in_dim)
+
+    def test_noncommensurate_block_sizes(self) -> None:
+        """Non-commensurate primary/residual block sizes build + reconstruct (no IndexError)."""
+        torch.manual_seed(5)
+        in_dim = 34  # bs_0=10 -> cov0=30 rem0=4 ; bs_1=12 -> cov1=24 rem1=10
+        n_rows = NUM_EXPERTS * OUT_DIM
+        rows = torch.randn(n_rows, in_dim) * 0.1
+        params = self._params(n_codebooks=2, residual_block_sizes=12)
+        result = build_codebook(
+            rows,
+            params,
+            k=K,
+            n_blocks=0,  # ignored (primary_block_size given)
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="noncomm",
+            primary_block_size=10,
+        )
+        assert result.block_sizes == [10, 12]
+        recon = result.reconstruct()
+        assert recon.shape == (n_rows, in_dim)
+        assert torch.isfinite(recon).all()
+
+        # Reference reconstruction implementing the documented formula.
+        ref = torch.zeros(n_rows, in_dim)
+        # primary (bs=10, cov=30)
+        for b in range(3):
+            d = result.codebooks[0][b].t()[result.assignments[0][b]]
+            ref[:, b * 10 : (b + 1) * 10] += result.scales[:, b].unsqueeze(-1) * d
+        assert result.remainders is not None and result.remainders[0] is not None
+        ref[:, 30:] += result.remainders[0].float()
+        # residual (bs=12, cov=24)
+        for b in range(2):
+            ref[:, b * 12 : (b + 1) * 12] += result.codebooks[1][b].t()[result.assignments[1][b]]
+        assert result.remainders[1] is not None
+        ref[:, 24:] += result.remainders[1].float()
+        assert torch.allclose(ref, recon, atol=1e-4)
+
+        # Error is finite and better than the zero reconstruction.
+        err = (rows.float() - recon).norm().item()
+        assert err < rows.float().norm().item()
+
+    def test_reproduction_failing_config(self) -> None:
+        """Regression: shared + SSVQ + cb8, non-commensurate cb0 bs=10 / cb1 bs=12.
+
+        This is the config that previously crashed with IndexError in reconstruct.
+        """
+        torch.manual_seed(0)
+        num_experts = 2
+        out_dim = 150
+        in_dim = 2048  # divisible by neither 10 nor 12
+        rows = torch.randn(num_experts * out_dim, in_dim) * 0.1
+        params = CodebookParams(
+            k_gate=256,
+            n_blocks_gate_up=1,
+            n_codebooks=2,
+            max_iters=3,
+            norm_threshold=1e-9,
+            skip_zeros=False,
+            residual_k=16,
+            residual_block_sizes=12,
+        )
+        result = build_codebook(
+            rows,
+            params,
+            k=256,
+            n_blocks=0,
+            n_codebooks=2,
+            num_experts=num_experts,
+            out_dim=out_dim,
+            device=torch.device("cpu"),
+            name="repro",
+            shared_codebook=True,
+            sign_split=True,
+            codebook_bits=8,
+            residual_block_sizes=12,
+            primary_block_size=10,
+        )
+        recon = result.reconstruct()  # must NOT raise IndexError
+        assert recon.shape == (num_experts * out_dim, in_dim)
+        err = (rows.float() - recon).norm().item()
+        assert err == err and err != float("inf")  # finite
+        assert err < rows.float().norm().item()
+
+
+def _ref_reconstruct(result: CodebookResult) -> torch.Tensor:
+    """Independent (non-shared) reference reconstruction applying per-codebook signs.
+
+    Mirrors the documented scheme: primary = signs_0 ⊙ (scale_0 ⊙ dir_0); each
+    residual = signs_c ⊙ centroids_c[assign_c]; per-codebook raw remainder added.
+    """
+    n_rows = result.scales.shape[0]
+    bs_list = result.bs_per_codebook()
+    in_dim = result.in_dim()
+    recon = torch.zeros(n_rows, in_dim)
+    for c in range(result.n_codebooks):
+        bs_c = bs_list[c]
+        n_blocks_c = in_dim // bs_c
+        cov_c = n_blocks_c * bs_c
+        buf = torch.zeros(n_rows, cov_c)
+        for b in range(n_blocks_c):
+            cb = result.codebooks[c][b]  # (bs_c, K)
+            centroid = cb.t()[result.assignments[c][b]]  # (n_rows, bs_c)
+            if c == 0:
+                centroid = result.scales[:, b].unsqueeze(-1) * centroid
+            buf[:, b * bs_c : (b + 1) * bs_c] = centroid
+        if result.sign_bits is not None and result.sign_bits[c] is not None:
+            sc = result.sign_bits[c]
+            assert sc is not None
+            buf = buf * sc.reshape(n_rows, cov_c).float()
+        recon[:, :cov_c] += buf
+        if result.remainders is not None and result.remainders[c] is not None:
+            rem = result.remainders[c]
+            assert rem is not None
+            recon[:, cov_c:] += rem.float()
+    return recon
+
+
+class TestPerCodebookSignSplit:
+    def _params(self, **overrides: object) -> CodebookParams:
+        defaults: dict[str, object] = dict(
+            k_gate=K,
+            k_up=K,
+            k_down=K,
+            n_blocks_gate_up=N_BLOCKS,
+            n_blocks_down=N_BLOCKS,
+            n_codebooks=N_CODEBOOKS,
+            max_iters=20,
+            norm_threshold=1e-9,
+            skip_zeros=False,
+        )
+        defaults.update(overrides)
+        return CodebookParams(**defaults)  # type: ignore[arg-type]
+
+    def test_primary_only_signsplit_is_list_and_matches_reference(self) -> None:
+        """(a) Bare-bool sign_split = primary-only; signs stored as a list at [0]."""
+        torch.manual_seed(4)
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.1
+        result = build_codebook(
+            rows,
+            self._params(n_codebooks=2),
+            k=K,
+            n_blocks=N_BLOCKS,
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="pss",
+            sign_split=True,
+        )
+        # sign_bits is now a per-codebook list; primary present, residual absent.
+        assert isinstance(result.sign_bits, list)
+        assert result.sign_bits[0] is not None
+        assert result.sign_bits[0].shape == (NUM_EXPERTS * OUT_DIM, IN_DIM)
+        assert result.sign_bits[1] is None
+        # reconstruct() matches an independent reference.
+        recon = result.reconstruct()
+        assert torch.allclose(recon, _ref_reconstruct(result), atol=1e-4)
+
+    def test_bool_true_equals_explicit_primary_only_list(self) -> None:
+        """Regression: sign_split=True is IDENTICAL to sign_split=[True, False]."""
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.1
+        kwargs = dict(
+            k=K,
+            n_blocks=N_BLOCKS,
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+        )
+        # Reset RNG before each build: euclidean residual uses global-RNG Forgy init.
+        torch.manual_seed(4)
+        r_bool = build_codebook(
+            rows, self._params(n_codebooks=2), name="b", sign_split=True, **kwargs
+        )
+        torch.manual_seed(4)
+        r_list = build_codebook(
+            rows, self._params(n_codebooks=2), name="l", sign_split=[True, False], **kwargs
+        )
+        assert torch.allclose(r_bool.reconstruct(), r_list.reconstruct(), atol=1e-6)
+
+    def test_residual_signsplit_matches_reference(self) -> None:
+        """(b) A residual with sign_split builds; reconstruct matches per-codebook ref."""
+        torch.manual_seed(8)
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.5
+        result = build_codebook(
+            rows,
+            self._params(n_codebooks=2),
+            k=K,
+            n_blocks=N_BLOCKS,
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="rss",
+            sign_split=[False, True],
+        )
+        assert isinstance(result.sign_bits, list)
+        assert result.sign_bits[0] is None
+        assert result.sign_bits[1] is not None
+        assert result.sign_bits[1].shape == (NUM_EXPERTS * OUT_DIM, IN_DIM)
+        # Residual centroids clustered on folded (abs) error => all non-negative.
+        assert result.codebooks[1].min().item() >= -1e-4
+        recon = result.reconstruct()
+        assert torch.allclose(recon, _ref_reconstruct(result), atol=1e-4)
+
+    def test_both_signsplit_no_shape_error_and_reduces_error(self) -> None:
+        """(c) Primary AND residual sign_split: valid shapes + residual reduces error."""
+        torch.manual_seed(9)
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.3
+        r1 = build_codebook(
+            rows,
+            self._params(n_codebooks=1),
+            k=K,
+            n_blocks=N_BLOCKS,
+            n_codebooks=1,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="p_only",
+            sign_split=[True],
+        )
+        r2 = build_codebook(
+            rows,
+            self._params(n_codebooks=2),
+            k=K,
+            n_blocks=N_BLOCKS,
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="both",
+            sign_split=[True, True],
+        )
+        recon2 = r2.reconstruct()
+        assert recon2.shape == (NUM_EXPERTS * OUT_DIM, IN_DIM)
+        assert torch.isfinite(recon2).all()
+        assert torch.allclose(recon2, _ref_reconstruct(r2), atol=1e-4)
+        err1 = (rows.float() - r1.reconstruct()).norm().item()
+        err2 = (rows.float() - recon2).norm().item()
+        assert err2 < err1, f"residual should reduce error: {err2} >= {err1}"
+
+    def test_signsplit_length_mismatch_raises(self) -> None:
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.1
+        try:
+            build_codebook(
+                rows,
+                self._params(n_codebooks=2),
+                k=K,
+                n_blocks=N_BLOCKS,
+                n_codebooks=2,
+                num_experts=NUM_EXPERTS,
+                out_dim=OUT_DIM,
+                device=torch.device("cpu"),
+                name="bad",
+                sign_split=[True],  # too short for n_codebooks=2
+            )
+        except ValueError:
+            return
+        raise AssertionError("expected ValueError for sign_split length mismatch")
+
+    def test_gpu_forward_matches_reconstruct_with_signs(self) -> None:
+        """CodebookModule forward (with per-codebook signs) matches result.reconstruct()."""
+        torch.manual_seed(10)
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.3
+        result = build_codebook(
+            rows,
+            self._params(n_codebooks=2),
+            k=K,
+            n_blocks=N_BLOCKS,
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="gpuforward",
+            sign_split=[True, True],
+        )
+        mod = CodebookModule.from_result(result, out_dim=OUT_DIM)
+        # signs carried through to both codebooks.
+        assert mod.primary.signs is not None
+        assert mod.additives[0].signs is not None
+
+        # y = W_recon @ x  (row-major weights, per expert).
+        recon = result.reconstruct().reshape(NUM_EXPERTS, OUT_DIM, IN_DIM)
+        hidden = torch.randn(5, IN_DIM)
+        for e in range(NUM_EXPERTS):
+            actual = mod(hidden, expert_idx=e)
+            expected = hidden @ recon[e].t()
+            assert torch.allclose(actual, expected, atol=1e-3), f"expert {e} mismatch"
+
+    def test_signsplit_state_dict_roundtrip(self) -> None:
+        """Per-codebook signs survive save/load (meta carries sign_cov_list)."""
+        torch.manual_seed(12)
+        rows = torch.randn(NUM_EXPERTS * OUT_DIM, IN_DIM) * 0.3
+        result = build_codebook(
+            rows,
+            self._params(n_codebooks=2),
+            k=K,
+            n_blocks=N_BLOCKS,
+            n_codebooks=2,
+            num_experts=NUM_EXPERTS,
+            out_dim=OUT_DIM,
+            device=torch.device("cpu"),
+            name="rt",
+            sign_split=[True, True],
+        )
+        mod = CodebookModule.from_result(result, out_dim=OUT_DIM).to(torch.bfloat16)
+        hidden = torch.randn(6, IN_DIM).to(torch.bfloat16)
+        out_before = mod(hidden, expert_idx=2)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "module.pt"
+            torch.save(mod.state_dict_with_meta(), p)
+            loaded = CodebookModule.load(p)
+        assert loaded.primary.signs is not None
+        assert loaded.additives[0].signs is not None
+        out_after = loaded(hidden, expert_idx=2)
+        assert torch.allclose(out_before, out_after, atol=1e-6)
 
 
 class TestCodebookParameters:
@@ -417,7 +739,7 @@ class TestCodebookParameters:
 
 class TestForwardMatchesFormula:
     def test_forward_matches_formula(self) -> None:
-        """Forward output matches scale_0 * sum_c(Q @ centroid_c[assign_c]) computed manually."""
+        """Forward = scale_0 * primary_pass + sum_c residual_pass_c (residuals unscaled)."""
         torch.manual_seed(11)
         mod = _make_fake_module(k_list=[K, K // 2])
         hidden = torch.randn(5, IN_DIM)
@@ -429,13 +751,12 @@ class TestForwardMatchesFormula:
         total = torch.zeros(n_tokens, mod.out_dim)
         for b in range(mod.n_blocks):
             hb = hidden_blocked[:, b, :]
-            block_contrib = torch.zeros(n_tokens, mod.out_dim)
             l0 = hb @ mod.primary.codebook[b]
-            block_contrib = block_contrib + l0[:, mod.primary.assignments[expert_idx, b]]
+            prim_b = l0[:, mod.primary.assignments[expert_idx, b]]
+            total = total + prim_b * mod.primary.scales[expert_idx, b]
             for cb_mod in mod.additives:
                 lc = hb @ cb_mod.codebook[b]
-                block_contrib = block_contrib + lc[:, cb_mod.assignments[expert_idx, b]]
-            total = total + block_contrib * mod.primary.scales[expert_idx, b]
+                total = total + lc[:, cb_mod.assignments[expert_idx, b]]  # unscaled
         assert torch.allclose(actual, total, atol=1e-5)
 
 
@@ -543,9 +864,7 @@ class TestForwardModesEquivalent:
             device=torch.device("cpu"),
             name="int",
         )
-        mod = CodebookModule.from_result(
-            result, n_blocks=result.n_blocks, block_size=BLOCK_SIZE, out_dim=OUT_DIM
-        )
+        mod = CodebookModule.from_result(result, out_dim=OUT_DIM)
         hidden = torch.randn(5, IN_DIM)
         out = mod(hidden, expert_idx=1)
         assert out.shape == (5, OUT_DIM)

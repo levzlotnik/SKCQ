@@ -81,6 +81,7 @@ class CudaServer:
         output_assignments: list[str] | None = None,
         output_scales: str | None = None,
         output_zero_mask: str | None = None,
+        output_remainders: list[str | None] | None = None,
     ) -> dict[str, Any]:
         cb_params = CodebookParams(**params) if params is not None else CodebookParams()
 
@@ -115,6 +116,12 @@ class CudaServer:
                     "zero_mask": result.zero_mask,
                     "n_blocks": result.n_blocks,
                     "n_codebooks": result.n_codebooks,
+                    "shared_codebook": result.shared_codebook,
+                    "sign_bits": result.sign_bits,
+                    "residual_block_sizes": result.residual_block_sizes,
+                    "remainders": result.remainders,
+                    "block_sizes": result.block_sizes,
+                    "num_experts": result.num_experts,
                 },
                 out_path,
             )
@@ -133,6 +140,13 @@ class CudaServer:
                 self.buffers[buf_name].copy_(result.assignments[i])
             self.buffers[output_scales].copy_(result.scales)
             self.buffers[output_zero_mask].copy_(result.zero_mask)
+            # Remainders: one shm buffer per codebook with rem_c > 0 (None = skip).
+            if output_remainders is not None and result.remainders is not None:
+                for i, rem_name in enumerate(output_remainders):
+                    rem = result.remainders[i]
+                    if rem_name is None or rem is None:
+                        continue
+                    self.buffers[rem_name].copy_(rem.float())
 
         return {"status": "ok"}
 

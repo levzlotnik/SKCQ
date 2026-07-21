@@ -269,26 +269,50 @@ def bits_per_weight_kmeans(
     scale_bits_per_elem: int = 16,
     bs_per_codebook: list[int] | None = None,
     codebook_bits: int = 16,
+    residual_sign_split: bool | list[bool] | None = None,
 ) -> float:
-    """Compute effective bits per weight for k-means quantization."""
+    """Compute effective bits per weight for k-means quantization.
+
+    Accounts per codebook for: codebook storage, assignment indices, the raw
+    (bf16) remainder columns (in_dim % bs_c), and — for any codebook with
+    sign-split enabled — 1 sign bit per covered element (Σ_c n_rows·cov_c).
+    Scales are primary-only. ``sign_split`` is the primary flag;
+    ``residual_sign_split`` (bool or per-residual list) covers c>=1.
+    """
     if bs_per_codebook is None:
         bs_per_codebook = [block_size] * n_codebooks
 
+    # Per-codebook sign-split flags: primary + residuals.
+    if residual_sign_split is None:
+        res_ss = [False] * (n_codebooks - 1)
+    elif isinstance(residual_sign_split, bool):
+        res_ss = [residual_sign_split] * (n_codebooks - 1)
+    else:
+        res_ss = list(residual_sign_split)[: n_codebooks - 1]
+        res_ss += [False] * (n_codebooks - 1 - len(res_ss))
+    ss_per_codebook = [sign_split, *res_ss]
+
     codebook_bits_total = 0
     assign_bits = 0
-    for _c, (bs_c, k_c) in enumerate(zip(bs_per_codebook, k_per_codebook, strict=True)):
+    remainder_bits = 0
+    sign_bits = 0
+    for c, (bs_c, k_c) in enumerate(zip(bs_per_codebook, k_per_codebook, strict=True)):
         n_blocks_c = in_dim // bs_c
+        cov_c = n_blocks_c * bs_c
+        rem_c = in_dim - cov_c
         n_cb_c = 1 if shared_codebook else n_blocks_c
         codebook_bits_total += n_cb_c * k_c * bs_c * codebook_bits
         if k_c <= 1:
             assign_bits += n_rows * n_blocks_c * 1
         else:
             assign_bits += n_rows * n_blocks_c * math.ceil(math.log2(k_c))
+        remainder_bits += n_rows * rem_c * 16  # bf16 raw remainder
+        if ss_per_codebook[c]:
+            sign_bits += n_rows * cov_c  # 1 bit per covered element
 
-    scale_bits = n_rows * n_blocks * scale_bits_per_elem
-    sign_bits = n_rows * n_blocks * block_size if sign_split else 0
+    scale_bits = n_rows * n_blocks * scale_bits_per_elem  # primary blocks only
 
-    total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits
+    total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits + remainder_bits
     total_weights = n_rows * in_dim
     return total_bits / total_weights
 
@@ -316,6 +340,7 @@ def run_one_kmeans(
     residual_block_sizes: int | list[int] | None = None,
     codebook_bits: int = 16,
     residual_k: int | list[int] | None = None,
+    residual_sign_split: bool | list[bool] | None = None,
     layer_idx: int = 24,
     device: torch.device | None = None,
     chunk_budget_mb: int = 256,
@@ -359,6 +384,20 @@ def run_one_kmeans(
             block_size if c == 0 else residual_block_sizes[c - 1] for c in range(n_codebooks)
         ]
 
+    # Sign-split per codebook: primary from `sign_split`, residuals from
+    # `residual_sign_split` (bool applies to all residuals, list is per-residual).
+    if residual_sign_split is None:
+        res_ss = [False] * (n_codebooks - 1)
+    elif isinstance(residual_sign_split, bool):
+        res_ss = [residual_sign_split] * (n_codebooks - 1)
+    else:
+        if len(residual_sign_split) < n_codebooks - 1:
+            raise ValueError(
+                f"residual_sign_split has {len(residual_sign_split)} values, need {n_codebooks - 1}"
+            )
+        res_ss = list(residual_sign_split[: n_codebooks - 1])
+    sign_split_list = [sign_split, *res_ss]
+
     shared_tag = "shared" if shared_codebook else "perblock"
     ssvq_tag = "ssvq" if sign_split else "nosign"
     cb_parts = [f"cb{c}_b{bs_per_codebook[c]}k{k_per_codebook[c]}" for c in range(n_codebooks)]
@@ -397,11 +436,8 @@ def run_one_kmeans(
         chunk_budget_mb=chunk_budget_mb,
     )
 
-    W_quant = W_raw[:, :quant_dim]
-    W_remainder = W_raw[:, quant_dim:] if remainder_dim > 0 else None
-
     result = build_codebook(
-        rows=W_quant.to(device),
+        rows=W_raw.to(device),
         params=params,
         k=K,
         n_blocks=n_blocks,
@@ -412,11 +448,12 @@ def run_one_kmeans(
         name=f"L{layer_idx}.{projection}.{label}",
         distance_metric=metric,
         shared_codebook=shared_codebook,
-        sign_split=sign_split,
+        sign_split=sign_split_list,
         residual_block_sizes=residual_block_sizes,
         codebook_bits=codebook_bits,
         primary_codebook_cache=primary_codebook_cache,
         cache_key_str=cache_key_str,
+        primary_block_size=block_size,
     )
 
     # Quantize scales (full-precision fp32 → target dtype → dequantized fp32)
@@ -424,17 +461,13 @@ def run_one_kmeans(
     result.scales = quantize_scales(result.scales, scale_dtype)
     logger.info("  [%s] scale quantized to %s (%d bits/elem)", projection, scale_dtype, sc_bits)
 
-    W_recon_quant = result.reconstruct()
-    if W_remainder is not None:
-        W_recon = torch.cat([W_recon_quant, W_remainder.float()], dim=1)
-    else:
-        W_recon = W_recon_quant
+    W_recon = result.reconstruct()
 
     err = torch.norm(W_raw.float() - W_recon).item() / W_norm
 
-    bpw_quant = bits_per_weight_kmeans(
+    bpw = bits_per_weight_kmeans(
         n_rows,
-        quant_dim,
+        in_dim,
         n_blocks,
         block_size,
         n_codebooks,
@@ -444,12 +477,8 @@ def run_one_kmeans(
         scale_bits_per_elem=sc_bits,
         bs_per_codebook=bs_per_codebook,
         codebook_bits=codebook_bits,
+        residual_sign_split=res_ss,
     )
-    if remainder_dim > 0:
-        total_bits = bpw_quant * n_rows * quant_dim + 16 * n_rows * remainder_dim
-        bpw = total_bits / (n_rows * in_dim)
-    else:
-        bpw = bpw_quant
     comp_ratio = 16.0 / bpw
 
     logger.info("  [%s] err=%.6f bpw=%.3f cr=%.2f", projection, err, bpw, comp_ratio)

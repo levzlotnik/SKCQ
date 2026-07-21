@@ -286,9 +286,7 @@ class VQOrchestrator:
             try:
                 self.server_sock.settimeout(2.0)
                 conn, addr = self.server_sock.accept()
-                threading.Thread(
-                    target=self._handle_worker, args=(conn, addr), daemon=True
-                ).start()
+                threading.Thread(target=self._handle_worker, args=(conn, addr), daemon=True).start()
             except TimeoutError:
                 continue
             except OSError:

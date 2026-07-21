@@ -49,7 +49,8 @@ class VQCodebookSpec:
     block_size: int
     K: int
     # Primary-only fields (None for residuals — residuals are always euclidean,
-    # no sign split, fp16 scales):
+    # fp16 scales). Exception: `sign_split` may ALSO be set on a residual to
+    # enable per-codebook SSVQ on that residual (its own fold/cluster/signs).
     metric: str | None = None  # "cosine" | "euclidean"
     sign_split: bool | None = None
     scale_dtype: str | None = None  # "int8", "fp16", "bf16", "fp8_e4m3", ...
@@ -96,47 +97,46 @@ class VQConfig:
             parts.append(f"sd{self.primary.scale_dtype}")
         for i, r in enumerate(self.residuals):
             parts.append(f"r{i}_b{r.block_size}_K{r.K}")
+            if r.sign_split:
+                parts.append(f"r{i}ss{int(r.sign_split)}")
         return "_".join(parts)
 
     @property
     def est_bpw(self) -> float:
-        """Estimated bits per weight (mirrors bits_per_weight_kmeans)."""
+        """Estimated bits per weight (mirrors runner.bits_per_weight_kmeans)."""
         n_rows, in_dim = MODEL_DIMS[self.projection]
         block_size = self.primary.block_size
         n_blocks = in_dim // block_size
-        quant_dim = n_blocks * block_size
-        remainder_dim = in_dim - quant_dim
 
         # Scale bits: int8 = 8, fp16 = 16, bf16 = 16, fp8 = 8
         scale_bits_map = {"int8": 8, "fp16": 16, "bf16": 16, "fp8_e4m3": 8, "fp8_e5m2": 8}
         scale_bits_per_elem = scale_bits_map.get(self.primary.scale_dtype or "bf16", 16)
 
-        # Codebook storage + assignments per codebook
-        # Codebook always stored in original dtype (16 bits)
-        codebook_bits_per_elem = 16
+        codebook_bits_per_elem = 16  # codebook always stored in original dtype
         codebook_bits_total = 0
         assign_bits = 0
+        remainder_bits = 0
+        sign_bits = 0
         specs = [self.primary, *self.residuals]
-        for _c, spec in enumerate(specs):
+        for spec in specs:
             bs_c = spec.block_size
             n_blocks_c = in_dim // bs_c
-            # Shared codebook: 1 codebook per codebook level
+            cov_c = n_blocks_c * bs_c
+            rem_c = in_dim - cov_c
             n_cb_c = 1  # always shared in the sweep
             codebook_bits_total += n_cb_c * spec.K * bs_c * codebook_bits_per_elem
             if spec.K <= 1:
                 assign_bits += n_rows * n_blocks_c * 1
             else:
                 assign_bits += n_rows * n_blocks_c * math.ceil(math.log2(spec.K))
+            remainder_bits += 16 * n_rows * rem_c  # bf16 raw remainder
+            if spec.sign_split:
+                sign_bits += n_rows * cov_c  # 1 bit per covered element (this codebook)
 
-        # Scales: one per primary block
+        # Scales: one per primary block.
         scale_bits = n_rows * n_blocks * scale_bits_per_elem
-        # Signs: 1 bit per element (at primary block size) if sign_split
-        sign_bits = n_rows * n_blocks * block_size if self.primary.sign_split else 0
 
-        total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits
-        if remainder_dim > 0:
-            total_bits += 16 * n_rows * remainder_dim  # bf16 remainder
-
+        total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits + remainder_bits
         return total_bits / (n_rows * in_dim)
 
     @property
@@ -211,8 +211,8 @@ class VQCodebookRange:
                     yield VQCodebookSpec(block_size=bs, K=k_val)
 
     def count(self, in_dim: int) -> int:
-        """Number of valid specs (after divisibility filter)."""
-        return sum(1 for s in self.enumerate_specs() if in_dim % s.block_size == 0)
+        """Number of specs. Block sizes need not divide in_dim (remainder handled)."""
+        return sum(1 for _ in self.enumerate_specs())
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +238,12 @@ class VQHyperparamRange:
     after all previous codebooks.
 
     Filtering rules (applied in __iter__):
-        - in_dim % block_size == 0 (for every codebook in the config)
         - K <= n_rows (can't have more centroids than training points)
-        - residual block_size must divide OR be a multiple of primary block_size
         - est_bpw must be in [bpw_min, bpw_max]
+
+    Block sizes need NOT divide in_dim, and residual block sizes are fully
+    independent of the primary (non-commensurate allowed) — leftover columns
+    are stored raw (bf16) as a per-codebook remainder.
     """
 
     projection: list[str] = field(default_factory=lambda: ["gate", "down"])

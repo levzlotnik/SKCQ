@@ -107,17 +107,8 @@ def _save_layer_results(
     layer_dir.mkdir(parents=True, exist_ok=True)
 
     for name, result in results.items():
-        if name == "gate" or name == "up":
-            out_dim = intermediate_size
-            in_dim = hidden_size
-        else:  # down
-            out_dim = hidden_size
-            in_dim = intermediate_size
-
-        block_size = in_dim // result.n_blocks
-        module = CodebookModule.from_result(
-            result, n_blocks=result.n_blocks, block_size=block_size, out_dim=out_dim
-        )
+        out_dim = intermediate_size if name in ("gate", "up") else hidden_size
+        module = CodebookModule.from_result(result, out_dim=out_dim)
         torch.save(module.state_dict_with_meta(), layer_dir / f"{name}.pt")
 
     logger.info("Saved layer %d results to %s", layer_idx, layer_dir)
@@ -144,16 +135,16 @@ class Orchestrator:
         skipped: list[int] = []
         for i in range(num_layers):
             layer_dir = output_dir / f"layer_{i}"
-            if all(
-                (layer_dir / f"{n}.pt").exists()
-                for n in ("gate", "up", "down")
-            ):
+            if all((layer_dir / f"{n}.pt").exists() for n in ("gate", "up", "down")):
                 skipped.append(i)
             else:
                 self.job_queue.put(i)
         if skipped:
-            logger.info("Resuming: %d layers already saved, %d to build",
-                        len(skipped), num_layers - len(skipped))
+            logger.info(
+                "Resuming: %d layers already saved, %d to build",
+                len(skipped),
+                num_layers - len(skipped),
+            )
         # No sentinel — workers get DoneMessage when all layers complete,
         # tracked via self.completed. A sentinel would strand re-queued jobs
         # behind it in the FIFO queue after a worker timeout.
@@ -312,9 +303,7 @@ class Orchestrator:
                 server.settimeout(1.0)
                 conn, addr = server.accept()
                 conn.settimeout(timeout)
-                t = threading.Thread(
-                    target=self._handle_worker, args=(conn, addr), daemon=True
-                )
+                t = threading.Thread(target=self._handle_worker, args=(conn, addr), daemon=True)
                 t.start()
                 threads.append(t)
             except OSError as e:
@@ -346,6 +335,4 @@ class Orchestrator:
         if self.completed < self.num_layers:
             missing = set(range(self.num_layers)) - set(self.layer_results.keys())
             logger.error("Missing layers: %s", sorted(missing))
-            raise RuntimeError(
-                f"Only {self.completed}/{self.num_layers} layers completed"
-            )
+            raise RuntimeError(f"Only {self.completed}/{self.num_layers} layers completed")

@@ -34,11 +34,10 @@ def modules_from_results(
         layer_modules: dict[str, CodebookModule] = {}
         for name in ["gate", "up", "down"]:
             result = layer_result[name]
-            block_size = result.codebooks[0].shape[1]
-            out_dim = result.assignments[0].shape[2]
-            layer_modules[name] = CodebookModule.from_result(
-                result, n_blocks=result.n_blocks, block_size=block_size, out_dim=out_dim
-            )
+            n_rows = result.scales.shape[0]
+            assert result.num_experts is not None
+            out_dim = n_rows // result.num_experts
+            layer_modules[name] = CodebookModule.from_result(result, out_dim=out_dim)
         modules.append(layer_modules)
     return modules
 
@@ -85,11 +84,10 @@ def save_codebooks(codebook_results: list[dict[str, CodebookResult]], output_dir
         layer_dir.mkdir(exist_ok=True)
         for name in ["gate", "up", "down"]:
             result = layer_result[name]
-            block_size = result.codebooks[0].shape[1]
-            out_dim = result.assignments[0].shape[2]
-            module = CodebookModule.from_result(
-                result, n_blocks=result.n_blocks, block_size=block_size, out_dim=out_dim
-            )
+            n_rows = result.scales.shape[0]
+            assert result.num_experts is not None
+            out_dim = n_rows // result.num_experts
+            module = CodebookModule.from_result(result, out_dim=out_dim)
             payload = module.state_dict_with_meta()
             payload["zero_mask"] = result.zero_mask
             torch.save(payload, layer_dir / f"{name}.pt")
@@ -202,9 +200,7 @@ def run_baseline_and_build(
             )
             logger.info("Saved baseline to %s", baseline_cache)
 
-    get_or_build_codebooks(
-        model, exp_config, codebook_dir, cuda_worker=cuda_worker
-    )
+    get_or_build_codebooks(model, exp_config, codebook_dir, cuda_worker=cuda_worker)
 
 
 def run_tasks_eval(

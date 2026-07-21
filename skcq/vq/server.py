@@ -52,7 +52,7 @@ def fetch_results(db: sqlite3.Connection, db_lock: threading.Lock) -> list[dict]
             d["sign_split"] = bool(d["sign_split"])
             try:
                 d["residual_block_sizes"] = json.loads(d.get("residual_block_sizes") or "[]")
-            except (TypeError, json.JSONDecodeError):
+            except TypeError, json.JSONDecodeError:
                 d["residual_block_sizes"] = []
             rows.append(d)
     return rows
@@ -123,8 +123,14 @@ def create_app(orch: VQOrchestrator) -> Flask:
     def api_set_range():
         orch.range = VQHyperparamRange.from_dict(json.loads(request.data))
         orch._rebuild_queue()
-        return jsonify({"applied": "now", "est_configs": len(orch.range),
-                        "total": orch.total, "in_queue": orch.job_queue.qsize()})
+        return jsonify(
+            {
+                "applied": "now",
+                "est_configs": len(orch.range),
+                "total": orch.total,
+                "in_queue": orch.job_queue.qsize(),
+            }
+        )
 
     @app.route("/api/workers")
     def api_workers():

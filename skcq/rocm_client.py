@@ -143,9 +143,12 @@ class RocmClient:
 
         codebooks = list(data["codebooks"])
         scales = data["scales"]
+        remainders = data.get("remainders")
         if codebooks[0].dtype == torch.float32:
             codebooks = [cb.to(torch.bfloat16) for cb in codebooks]
             scales = scales.to(torch.bfloat16)
+            if remainders is not None:
+                remainders = [(r.to(torch.bfloat16) if r is not None else None) for r in remainders]
         return CodebookResult(
             codebooks=codebooks,
             assignments=list(data["assignments"]),
@@ -153,6 +156,12 @@ class RocmClient:
             zero_mask=data["zero_mask"],
             n_blocks=data["n_blocks"],
             n_codebooks=data["n_codebooks"],
+            shared_codebook=data.get("shared_codebook", False),
+            sign_bits=data.get("sign_bits"),
+            residual_block_sizes=data.get("residual_block_sizes"),
+            remainders=remainders,
+            block_sizes=data.get("block_sizes"),
+            num_experts=data.get("num_experts", num_experts),
         )
 
     def _build_codebook_shm(
@@ -226,6 +235,31 @@ class RocmClient:
             ("zero_mask", "skcq_mask", mask_shape, np.zeros(mask_shape, dtype=np.bool_), np.bool_)
         )
 
+        # Remainder buffers: one per codebook with rem_c > 0 (bf16 stored as f32).
+        in_dim = rows_cpu.shape[1]
+        n_rows = num_experts * out_dim
+        rem_dims = [in_dim - (in_dim // bs_list[c]) * bs_list[c] for c in range(n_codebooks)]
+        rem_names: list[str | None] = []
+        rem_shm_index: list[int | None] = []
+        for c in range(n_codebooks):
+            if rem_dims[c] > 0:
+                rem_shape = (n_rows, rem_dims[c])
+                name_c = f"remainder_{c}"
+                specs.append(
+                    (
+                        name_c,
+                        f"skcq_rem_{c}",
+                        rem_shape,
+                        np.zeros(rem_shape, dtype=np.float32),
+                        np.float32,
+                    )
+                )
+                rem_names.append(name_c)
+                rem_shm_index.append(len(specs) - 1)
+            else:
+                rem_names.append(None)
+                rem_shm_index.append(None)
+
         shms: list[shared_memory.SharedMemory] = []
         for shm_name, shm_id, shape, data_arr, dtype in specs:
             itemsize = np.dtype(dtype).itemsize
@@ -253,6 +287,7 @@ class RocmClient:
                     "output_assignments": [f"assignments_{c}" for c in range(n_codebooks)],
                     "output_scales": "scales",
                     "output_zero_mask": "zero_mask",
+                    "output_remainders": rem_names,
                     "k": k,
                     "n_blocks": n_blocks,
                     "n_codebooks": n_codebooks,
@@ -286,6 +321,18 @@ class RocmClient:
             zero_mask = torch.from_numpy(
                 np.ndarray(mask_shape, dtype=np.bool_, buffer=shms[2 + 2 * n_codebooks].buf).copy()
             )
+            remainders: list[torch.Tensor | None] | None = None
+            if any(idx is not None for idx in rem_shm_index):
+                remainders = []
+                for c in range(n_codebooks):
+                    idx = rem_shm_index[c]
+                    if idx is None:
+                        remainders.append(None)
+                    else:
+                        arr = np.ndarray(
+                            (n_rows, rem_dims[c]), dtype=np.float32, buffer=shms[idx].buf
+                        ).copy()
+                        remainders.append(torch.from_numpy(arr).to(torch.bfloat16))
         finally:
             for shm_name, _, _, _, _ in specs:
                 self._rpc("detach_buffer", {"name": shm_name})
@@ -293,6 +340,7 @@ class RocmClient:
                 shm.close()
                 shm.unlink()
 
+        rbs_out = [bs for bs in bs_list[1:] if bs != bs_list[0]]
         return CodebookResult(
             codebooks=codebooks,
             assignments=assignments,
@@ -300,6 +348,11 @@ class RocmClient:
             zero_mask=zero_mask,
             n_blocks=n_blocks,
             n_codebooks=n_codebooks,
+            shared_codebook=True,
+            residual_block_sizes=rbs_out if rbs_out else None,
+            remainders=remainders,
+            block_sizes=list(bs_list),
+            num_experts=num_experts,
         )
 
     def close(self) -> None:
@@ -307,7 +360,7 @@ class RocmClient:
             try:
                 self._rpc("quit", {})
                 self.child.wait(timeout=5)
-            except (RuntimeError, subprocess.TimeoutExpired):
+            except RuntimeError, subprocess.TimeoutExpired:
                 self.child.kill()
                 self.child.wait()
         logger.info("CUDA worker shut down")
