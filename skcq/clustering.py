@@ -147,7 +147,7 @@ class CodebookResult:
         bs_list = self.bs_per_codebook()
         recon_blocks = []
         for b in range(n_blocks):
-            col_start_p = b * bs_p
+            b * bs_p
             final_direction = torch.zeros(n_rows, bs_p, dtype=torch.float32)
             for c in range(self.n_codebooks):
                 bs_c = bs_list[c]
@@ -198,10 +198,7 @@ def _assign_to_centroids(
     Data stays on its original device; chunks are moved to centroids' device
     for the matmul, results moved back.
     """
-    if centroids.shape[0] == data.shape[1]:
-        cb = centroids.t()
-    else:
-        cb = centroids
+    cb = centroids.t() if centroids.shape[0] == data.shape[1] else centroids
     n = data.shape[0]
     labels = torch.empty(n, dtype=torch.long, device=data.device)
     for i in range(0, n, chunk_size):
@@ -223,10 +220,7 @@ def _assign_to_centroids_l2(
     Data stays on its original device; chunks are moved to centroids' device
     for the matmul, results moved back.
     """
-    if centroids.shape[0] == data.shape[1]:
-        cb = centroids.t()
-    else:
-        cb = centroids
+    cb = centroids.t() if centroids.shape[0] == data.shape[1] else centroids
     n = data.shape[0]
     labels = torch.empty(n, dtype=torch.long, device=data.device)
     cb_sq = cb.square().sum(dim=-1).unsqueeze(0)
@@ -512,19 +506,25 @@ def _cluster_block(
 
     # Sub-sample for k-means training if dataset is too large (torch.multinomial
     # in k-means++ init is limited to 2^24 categories)
-    MAX_MULTINOMIAL = (2 ** 24) - 1
+    max_multinomial = (2 ** 24) - 1
     train_data = non_zero
     train_raw = raw_data if raw_data is not None else non_zero
     if max_train_samples > 0 and non_zero.shape[0] > max_train_samples:
         perm = torch.randperm(non_zero.shape[0], device=non_zero.device)[:max_train_samples]
         train_data = non_zero[perm]
         train_raw = train_raw[perm]
-        logger.info("[%s] sub-sampled %d -> %d for k-means training", name, non_zero.shape[0], train_data.shape[0])
-    elif non_zero.shape[0] > MAX_MULTINOMIAL:
-        perm = torch.randperm(non_zero.shape[0], device=non_zero.device)[:MAX_MULTINOMIAL]
+        logger.info(
+            "[%s] sub-sampled %d -> %d for k-means training",
+            name, non_zero.shape[0], train_data.shape[0],
+        )
+    elif non_zero.shape[0] > max_multinomial:
+        perm = torch.randperm(non_zero.shape[0], device=non_zero.device)[:max_multinomial]
         train_data = non_zero[perm]
         train_raw = train_raw[perm]
-        logger.info("[%s] sub-sampled %d -> %d for k-means training (multinomial limit)", name, non_zero.shape[0], train_data.shape[0])
+        logger.info(
+            "[%s] sub-sampled %d -> %d for k-means training (multinomial limit)",
+            name, non_zero.shape[0], train_data.shape[0],
+        )
 
     train_chunk_size = min(chunk_size, train_data.shape[0])
 
@@ -585,7 +585,9 @@ def _cluster_block(
         )
 
         # Re-assign ALL points to the learned centroids (l2: argmin distance)
-        labels_nz = _assign_to_centroids_l2(non_zero, centroids_kbd.t().contiguous(), chunk_size, device)
+        labels_nz = _assign_to_centroids_l2(
+            non_zero, centroids_kbd.t().contiguous(), chunk_size, device,
+        )
         labels_full = torch.zeros(n_rows, dtype=torch.long, device=block_data.device)
         labels_full[~block_zero] = labels_nz
         scales_full = torch.zeros(n_rows, dtype=torch.float32, device=block_data.device)
@@ -667,7 +669,10 @@ def build_codebook(
         rbs_list = [rbs_list_raw] * (n_codebooks - 1)
     else:  # list
         if len(rbs_list_raw) < n_codebooks - 1:
-            raise ValueError(f"residual_block_sizes has {len(rbs_list_raw)} values, need {n_codebooks - 1}")
+            raise ValueError(
+                f"residual_block_sizes has {len(rbs_list_raw)} values, "
+                f"need {n_codebooks - 1}"
+            )
         rbs_list = list(rbs_list_raw[:n_codebooks - 1])
     for i, rbs in enumerate(rbs_list):
         if rbs <= 0:
@@ -718,11 +723,9 @@ def build_codebook(
     cb_assignments: list[torch.Tensor] = []
 
     unit_residual = unit_blocks.clone()
-    # raw_residual mirrors unit_residual but with original magnitudes (folded to first orthant if sign_split)
-    if sign_split:
-        raw_residual = raw_blocks * signs  # first-orthant raw data
-    else:
-        raw_residual = raw_blocks.clone()
+    # raw_residual mirrors unit_residual but with original magnitudes
+    # (folded to first orthant if sign_split)
+    raw_residual = raw_blocks * signs if sign_split else raw_blocks.clone()
 
     for c in range(n_codebooks):
         k_c = k_per_codebook[c]
@@ -853,7 +856,10 @@ def build_codebook(
             scale = cb_max / levels
             q = torch.round(flat / scale).clamp(-levels, levels)
             cb_codebooks[c] = (q * scale).reshape(cb.shape).to(cb.dtype)
-            logger.info("[%s] codebook[%d] quantized to int%d (per-centroid scale)", name, c, codebook_bits)
+            logger.info(
+                "[%s] codebook[%d] quantized to int%d (per-centroid scale)",
+                name, c, codebook_bits,
+            )
 
     # Re-fit a single scale per (row, primary block) to the final reconstructed direction.
     # Each codebook contributes at its own block size — sum element-wise within
@@ -869,10 +875,7 @@ def build_codebook(
                 ratio_c = block_size // bs_c
                 for sub in range(ratio_c):
                     b_c = b * ratio_c + sub
-                    if shared_codebook:
-                        cb_c = cb_codebooks[c][0]
-                    else:
-                        cb_c = cb_codebooks[c][b_c]
+                    cb_c = cb_codebooks[c][0] if shared_codebook else cb_codebooks[c][b_c]
                     asg_c = cb_assignments[c][b_c]
                     sub_dir = cb_c.t()[asg_c]
                     col_start = sub * bs_c
@@ -882,10 +885,7 @@ def build_codebook(
                 ratio_c = bs_c // block_size
                 b_c = b // ratio_c
                 col_offset = (b % ratio_c) * block_size
-                if shared_codebook:
-                    cb_c = cb_codebooks[c][0]
-                else:
-                    cb_c = cb_codebooks[c][b_c]
+                cb_c = cb_codebooks[c][0] if shared_codebook else cb_codebooks[c][b_c]
                 asg_c = cb_assignments[c][b_c]
                 full_dir = cb_c.t()[asg_c]  # (n_rows, bs_c)
                 final_direction += full_dir[:, col_offset : col_offset + block_size]
@@ -901,7 +901,10 @@ def build_codebook(
         scale = dot / (final_direction.norm(dim=-1) ** 2 + 1e-10)
         scales_flat[:, b] = scale
     if n_flipped > 0:
-        logger.info("[%s] flipped %d/%d block-rows with negative dot(raw, direction)", name, n_flipped, n_rows * n_blocks)
+        logger.info(
+            "[%s] flipped %d/%d block-rows with negative dot(raw, direction)",
+            name, n_flipped, n_rows * n_blocks,
+        )
 
     assignments: list[torch.Tensor] = [a.cpu() for a in cb_assignments]
     codebooks_out = [cb.cpu() for cb in cb_codebooks]
