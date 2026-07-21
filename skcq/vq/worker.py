@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import socket
 import subprocess
 import sys
@@ -127,40 +126,19 @@ def _query_gpu_stats() -> list[tuple[int, int, int, float]]:
     return _query_gpu_stats_rocm()
 
 
-def _physical_device_index(logical_idx: int) -> int:
-    """Map a PyTorch-visible device index to its physical GPU index.
+def get_device_inventory(device_index: int | None = None) -> list[DeviceInfo]:
+    """Get static device info (called once on startup).
 
-    PyTorch exposes only the devices that HIP_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES
-    allow this process to see. When the process is pinned to one GPU via these env
-    vars (see usage at the top of this module), ``torch.cuda.device_count() == 1``
-    and the loop in ``get_device_stats`` always sees ``i = 0``. But the smi
-    subprocess ignores these vars and always lists all physical GPUs in physical
-    order, so indexing it with the logical ``i`` would silently report the wrong
-    GPU's utilization (the symptom that prompted this fix).
-
-    Returns the physical index that ``logical_idx`` corresponds to under the
-    current env-var remapping. If no *_VISIBLE_DEVICES is set, the mapping is the
-    identity, so this is a no-op for the single-GPU un-pinned case.
+    If ``device_index`` is given (the cuda index this worker was pinned to via
+    ``--device cuda:<idx>``), only that physical GPU is reported. Without it,
+    every visible device is enumerated — which on a multi-GPU host means every
+    worker reports stats for *every* physical GPU, and the dashboard can't tell
+    them apart (the symptom that prompted this fix). ``main()`` passes the index
+    resolved from ``--device`` after ``torch.cuda.set_device`` is called.
     """
-    env = os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES")
-    if not env or env == "all":
-        return logical_idx
-    # Both vars accept a comma-separated list of physical indices (no spaces,
-    # no ranges in the HIP/CUDA spec) and remap them in order: env index 0 ->
-    # first listed physical GPU, env index 1 -> second, etc.
-    try:
-        physical = [int(s) for s in env.split(",") if s.strip() != ""]
-    except ValueError:
-        return logical_idx
-    if 0 <= logical_idx < len(physical):
-        return physical[logical_idx]
-    return logical_idx
-
-
-def get_device_inventory() -> list[DeviceInfo]:
-    """Get static device info (called once on startup)."""
+    indices = range(torch.cuda.device_count()) if device_index is None else [device_index]
     devices = []
-    for i in range(torch.cuda.device_count()):
+    for i in indices:
         props = torch.cuda.get_device_properties(i)
         devices.append(
             DeviceInfo(
@@ -172,25 +150,23 @@ def get_device_inventory() -> list[DeviceInfo]:
     return devices
 
 
-def get_device_stats() -> list[DeviceStats]:
-    """Get live device stats (called every HEARTBEAT_INTERVAL)."""
-    pytorch_count = torch.cuda.device_count()
+def get_device_stats(device_index: int | None = None) -> list[DeviceStats]:
+    """Get live device stats (called every HEARTBEAT_INTERVAL).
+
+    See ``get_device_inventory`` for the ``device_index`` semantics. The smi
+    subprocess always lists physical GPUs in physical order, so we index it
+    directly by the (physical) ``device_index``.
+    """
+    indices = range(torch.cuda.device_count()) if device_index is None else [device_index]
     gpu_stats = _query_gpu_stats()  # GPU-wide (from smi subprocess)
     stats = []
-    for i in range(pytorch_count):
+    for i in indices:
         alloc_mb = int(torch.cuda.memory_allocated(i) / (1024 * 1024))
         reserved_mb = int(torch.cuda.memory_reserved(i) / (1024 * 1024))
-        # Translate this process's logical device index (which PyTorch sees after
-        # the *_VISIBLE_DEVICES filter) back to the physical index that the smi
-        # subprocess uses. Without this, a process pinned to physical GPU 1 with
-        # HIP_VISIBLE_DEVICES=1 would still report physical GPU 0's stats,
-        # because it sees its only device as index 0 and the smi list is in
-        # physical order.
-        physical_idx = _physical_device_index(i)
         used_mb = alloc_mb
         util = 0.0
-        if 0 <= physical_idx < len(gpu_stats):
-            _, used_mb, _, util = gpu_stats[physical_idx]
+        if 0 <= i < len(gpu_stats):
+            _, used_mb, _, util = gpu_stats[i]
         stats.append(
             DeviceStats(
                 index=i,
@@ -309,16 +285,23 @@ def process_vq_job(
 class HeartbeatThread(threading.Thread):
     """Sends HeartbeatMessage every HEARTBEAT_INTERVAL seconds."""
 
-    def __init__(self, sock: socket.socket, worker_name: str, shutdown_event: threading.Event):
+    def __init__(
+        self,
+        sock: socket.socket,
+        worker_name: str,
+        shutdown_event: threading.Event,
+        device_index: int | None = None,
+    ):
         super().__init__(daemon=True, name="heartbeat")
         self.sock = sock
         self.worker_name = worker_name
         self.shutdown_event = shutdown_event
+        self.device_index = device_index
 
     def run(self) -> None:
         while not self.shutdown_event.is_set():
             try:
-                stats = get_device_stats()
+                stats = get_device_stats(self.device_index)
                 msg = HeartbeatMessage(worker_name=self.worker_name, devices=stats)
                 send_frame(self.sock, msg)
             except ConnectionError, OSError:
@@ -383,7 +366,12 @@ def main() -> None:
     logger.info("Connected to orchestrator at %s:%d", host, port)
 
     # Send WorkerInfoMessage (device inventory, once)
-    devices = get_device_inventory()
+    # Send WorkerInfoMessage (device inventory, once). Pass the pinned device
+    # index (if any) so this worker only reports its assigned GPU — otherwise
+    # every worker on a multi-GPU host would echo stats for all visible GPUs
+    # and the dashboard couldn't tell leopard-gpu0 from leopard-gpu1.
+    device_index = device.index if device.type == "cuda" else None
+    devices = get_device_inventory(device_index)
     send_frame(
         sock, WorkerInfoMessage(worker_name=args.name, host=socket.gethostname(), devices=devices)
     )
@@ -391,7 +379,7 @@ def main() -> None:
 
     # Start heartbeat thread
     shutdown_event = threading.Event()
-    heartbeat = HeartbeatThread(sock, args.name, shutdown_event)
+    heartbeat = HeartbeatThread(sock, args.name, shutdown_event, device_index=device_index)
     heartbeat.start()
 
     # Weights are loaded lazily on first job — not here. This lets the
