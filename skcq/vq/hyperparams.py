@@ -268,8 +268,6 @@ class VQHyperparamRange:
 
     def _filtered_primary_specs(self, in_dim: int, n_rows: int) -> Iterator[VQCodebookSpec]:
         for spec in self.primary.enumerate_specs():
-            if in_dim % spec.block_size != 0:
-                continue
             if n_rows < spec.K:
                 continue
             yield spec
@@ -303,8 +301,6 @@ class VQHyperparamRange:
     ) -> Iterator[VQCodebookSpec]:
         primary_bs = primary_spec.block_size
         for spec in rrange.enumerate_specs():
-            if in_dim % spec.block_size != 0:
-                continue
             if n_rows < spec.K:
                 continue
             # Residual block_size must divide OR be a multiple of primary block_size
