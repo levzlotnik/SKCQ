@@ -299,12 +299,8 @@ class VQHyperparamRange:
     def _filtered_residual_specs(
         rrange: VQCodebookRange, primary_spec: VQCodebookSpec, in_dim: int, n_rows: int
     ) -> Iterator[VQCodebookSpec]:
-        primary_bs = primary_spec.block_size
         for spec in rrange.enumerate_specs():
             if n_rows < spec.K:
-                continue
-            # Residual block_size must divide OR be a multiple of primary block_size
-            if primary_bs % spec.block_size != 0 and spec.block_size % primary_bs != 0:
                 continue
             yield spec
 
