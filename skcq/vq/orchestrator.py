@@ -164,7 +164,7 @@ class WorkerState:
     def __init__(self, name: str, host: str) -> None:
         self.name = name
         self.host = host
-        self.enabled = True
+        self.enabled = False
         self.connected = False
         self.conn: socket.socket | None = None
         self.devices: list[dict] = []  # DeviceInfo as dict
@@ -458,28 +458,37 @@ class VQOrchestrator:
 
                 elif isinstance(msg, ReadyMessage):
                     ws = self.workers_state.get(worker_name)
-                    if ws and not ws.enabled:
-                        # Disabled: stay connected (heartbeats + GPU info)
-                        # but don't dispatch jobs. Wait for enable.
-                        while not self.shutdown.is_set() and not ws.enabled:
-                            time.sleep(0.5)
-                        if self.shutdown.is_set():
-                            send_frame(conn, DoneMessage())
-                            return
+                    # Worker is ready. Wait until: (a) enabled AND sweep is
+                    # running, (b) shutdown, or (c) disabled → kill.
                     while not self.shutdown.is_set():
+                        if ws is None or not ws.enabled:
+                            # Disabled: wait for re-enable or shutdown
+                            time.sleep(0.5)
+                            continue
+                        if self.state != "running":
+                            # Sweep not started yet — wait for launch()
+                            time.sleep(0.5)
+                            continue
                         if self.pause_event.is_set():
                             time.sleep(0.5)
                             continue
-                        try:
-                            job_id = self.job_queue.get(timeout=1)
-                            break
-                        except queue.Empty:
-                            if self.completed + len(self.failed) >= self.total:
-                                send_frame(conn, DoneMessage())
-                                return
-                            continue
-                    else:
+                        break
+                    if self.shutdown.is_set():
                         send_frame(conn, DoneMessage())
+                        return
+                    if ws is None or not ws.enabled:
+                        send_frame(conn, DoneMessage())
+                        return
+
+                    # Try to get a job from the queue
+                    try:
+                        job_id = self.job_queue.get(timeout=1)
+                    except queue.Empty:
+                        if self.completed + len(self.failed) >= self.total:
+                            send_frame(conn, DoneMessage())
+                            return
+                        # No job available right now — loop back to ReadyMessage
+                        continue
                         return
 
                     current_job = job_id
