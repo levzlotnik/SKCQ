@@ -800,15 +800,13 @@ def build_codebook(
                 if c == 0 and primary_codebook_cache is not None and cache_key_str is not None:
                     primary_codebook_cache.put(cache_key_str, result_pool.codebook)
                     logger.info("[%s] cb=%d/%d: cached primary codebook", name, c, n_codebooks)
-            # codebook: (cur_bs, K_c) — move to CPU for residual subtraction
-            # (data tensors stay on CPU; only k-means chunks went to GPU)
-            codebook_cpu = result_pool.codebook.cpu()
+            # codebook: (cur_bs, K_c) — single shared codebook
             labels_2d = result_pool.labels.reshape(n_rows, cur_n_blocks)
-            cb_codebooks.append(codebook_cpu.unsqueeze(0))  # (1, cur_bs, K_c)
+            cb_codebooks.append(result_pool.codebook.unsqueeze(0))  # (1, cur_bs, K_c)
             cb_assignments.append(labels_2d.t().contiguous())  # (cur_n_blocks, n_rows)
 
             # Residual subtraction
-            assigned = codebook_cpu.t()[result_pool.labels]  # (n_rows*cur_n_blocks, cur_bs)
+            assigned = result_pool.codebook.t()[result_pool.labels]  # (n_rows*cur_n_blocks, cur_bs)
             assigned = assigned.reshape(n_rows, cur_n_blocks, cur_bs)
             # zero_mask is per-row, broadcast across all blocks
             assigned[zero_mask] = 0.0
