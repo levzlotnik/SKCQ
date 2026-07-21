@@ -7,7 +7,7 @@ workers:
     venv: cuda/.venv/bin/python
     workdir: "~/Projects/SKCQ"
     device: cuda
-    chunk_budget_mb: 128    # 12GB VRAM — keep chunks small
+    chunk_budget_mb: 4096   # 24GB VRAM — 4GB for k-means chunks
 
   # - name: jaguar-strix
   #   host: localhost         # local subprocess, no SSH
@@ -27,13 +27,13 @@ workers:
     venv: .venv/bin/python
     workdir: "."
     device: auto
-    chunk_budget_mb: 512    # 12GB VRAM — keep chunks small
+    chunk_budget_mb: 2048   # 12GB VRAM — 2GB for k-means chunks
 
   - name: leopard
     host: leopard          # tailscale hostname
     venv: leopard/.venv/bin/python
     workdir: "~/Projects/SKCQ"
     device: cuda           # ROCm exposes as cuda in torch
-    chunk_budget_mb: 24576  # 34GB per R9700; ~24GB headroom per job
+    chunk_budget_mb: 8192  # 32GB VRAM per R9700 — 8GB for k-means chunks
     parallelism: 2         # one job per dGPU
     devices: [0, 1]        # dGPU indices; iGPU (gfx1036) excluded
