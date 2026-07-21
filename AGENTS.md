@@ -57,19 +57,46 @@ at the top of every module.
   Runs on ROCm. `--use-cuda-worker` offloads `build_codebook` (k-means) to a CUDA
   subprocess (`skcq/rocm_client.py` -> `skcq/cuda_server.py`, JSON-RPC over
   stdin/stdout, tensors via `/dev/shm`). This is why jaguar needs both venvs.
-- `skcq/clustering.py` — standalone k-means (only torch + pt_kmeans); imported by
-  both ROCm and CUDA sides. `CodebookParams`/`LayerOverride` live here.
+- `skcq/clustering.py` — standalone k-means + `build_codebook` +
+  `reconstruct_codebooks` (only torch + pt_kmeans); imported by both ROCm and
+  CUDA sides. `CodebookParams`/`LayerOverride`/`CodebookResult` live here.
 - `skcq/codebook_experts.py` — `CodebookModule` (PQ + additive residual codebooks),
-  drop-in replacement for MoE experts. Assignments are int64 buffers, codebooks/
-  scales are Parameters.
+  drop-in replacement for MoE experts. Assignments/signs are buffers, codebooks/
+  scales are Parameters. Each codebook carries its own block size, remainder, and
+  optional signs (see Codebook scheme).
 - **Two coexisting distributed paths** (don't conflate):
   - Ray: `distributed_run.py` + `skcq/ray_worker.py` (`ray.init(address="auto")`).
   - TCP: `skcq/orchestrator.py` + `worker.py` (length-prefixed pickle over TCP,
     SSH-launched remote workers, `skcq/protocol.py`). `worker.py` reads expert
     weights directly from safetensors shards (no transformers/model load).
+- **VQ hyperparameter sweep** (`skcq/vq/`) — a separate distributed system from
+  the two above: `skcq.vq.server` (Flask control plane + dashboard) +
+  `skcq.vq.orchestrator` (job queue + SQLite results) + `skcq.vq.worker`
+  (long-lived, loads one layer, pulls configs, calls `runner.run_one_kmeans`).
+  Search space + bpw/runtime estimates in `skcq/vq/hyperparams.py`;
+  primary-codebook cache in `skcq/vq/cache.py`.
 - Workflow is two-phase: build codebooks (ROCm/distributed) THEN quantized eval
   separately on the 3090 (`eval_quantized.py`). `baseline.pt` caches baseline
   ppl/routing/KLD and is auto-invalidated when `--kld-tokens` changes.
+
+### Codebook scheme (`build_codebook` / `reconstruct_codebooks`)
+
+Each codebook is self-contained; do NOT assume a shared block grid:
+- **Independent block size per codebook.** `bs_c` need not divide `in_dim`;
+  `n_blocks_c = in_dim // bs_c` and the leftover `in_dim % bs_c` columns are a
+  **raw bf16 remainder** stored per codebook and reconstructed exactly.
+- **Primary (c=0)** is spherical (cosine): unit-direction centroids + a
+  per-`(row, block)` scale. **Residuals (c≥1)** quantize the REAL error
+  `W − Σ_{c'<c} recon` with euclidean k-means (magnitude included, no own scale).
+- **SSVQ is per-codebook**: `CodebookResult.sign_bits` is a list (one entry per
+  codebook, `(n_rows, cov_c)` or None), applied to that codebook's contribution.
+- One **final scale re-fit** of the primary block scale against the full
+  reconstruction. `reconstruct_codebooks` is the single source of truth (used by
+  both `build_codebook` and `CodebookResult.reconstruct`) and **streams over
+  row-chunks** so builds fit low-VRAM GPUs (12 GB `serval`).
+- Runner/hyperparams bpw accounting must stay identical; both count per-codebook
+  remainder bits and per-codebook sign bits. There is NO block-size divisibility
+  filter — any block size is valid.
 
 ## Hardware / workers (`workers.yaml`)
 
