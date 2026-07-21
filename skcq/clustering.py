@@ -535,6 +535,33 @@ def _norm_weighted_spherical_kmeans(
     return centroids, labels.cpu()  # (K, d), (n,)
 
 
+def _pick_work_device(
+    n_rows: int,
+    block_size: int,
+    device: torch.device,
+    safety: float = 4.0,
+) -> torch.device:
+    """Choose where the block data lives during k-means.
+
+    Keeping data resident on the GPU turns every ``chunk.to(device)`` in the
+    k-means kernels into a no-op — no PCIe round-trips, no per-chunk host sync —
+    which is what keeps a big-VRAM dGPU (e.g. the 32 GB R9700) busy. We only do
+    this when the fp32 working set comfortably fits in *free* VRAM; otherwise we
+    fall back to CPU-resident data streamed in chunks (the low-VRAM ``serval``
+    path). ``safety`` covers the derived copies held simultaneously: ``.float()``
+    of the input, the unit-normalized copy, the (sub-sampled) train set, and the
+    per-chunk matmul temporaries.
+    """
+    if device.type != "cuda":
+        return torch.device("cpu")
+    fp32_bytes = n_rows * block_size * 4
+    try:
+        free, _total = torch.cuda.mem_get_info(device)
+    except Exception:  # pragma: no cover - driver/platform dependent
+        return torch.device("cpu")
+    return device if fp32_bytes * safety <= free else torch.device("cpu")
+
+
 def _cluster_block(
     block_data: torch.Tensor,
     k: int,
@@ -563,8 +590,14 @@ def _cluster_block(
             because torch.multinomial (k-means++ init) is limited to 2^24.
     """
     n_rows, block_size = block_data.shape
-    # Keep data on CPU — only k-means chunks and centroids use GPU
-    block_data = block_data.cpu()
+    # Residency policy: keep the data resident on the GPU when it fits in free
+    # VRAM (turns per-chunk `.to(device)` into no-ops — no PCIe traffic, keeps a
+    # big-VRAM dGPU busy); otherwise fall back to CPU-streamed chunks for
+    # low-VRAM GPUs. The k-means kernels are already device-agnostic: they move
+    # each chunk to the centroids' device, which is a no-op when already there.
+    work_device = _pick_work_device(n_rows, block_size, device)
+    block_data = block_data.to(work_device)
+    logger.debug("[%s] block data resident on %s (n_rows=%d)", name, work_device, n_rows)
     block_norms = block_data.norm(dim=-1)
     block_zero = block_norms < norm_threshold
 
@@ -658,14 +691,16 @@ def _cluster_block(
         scales_nz = torch.einsum("nd,nd->n", non_zero, assigned_centroids)
 
         cos_sim = torch.einsum("nd,nd->n", unit, assigned_centroids)
-        logger.info(
-            "[%s] training cos(raw_unit, centroid): mean=%.4f, std=%.4f, min=%.4f, max=%.4f",
-            name,
-            cos_sim.mean().item(),
-            cos_sim.std().item(),
-            cos_sim.min().item(),
-            cos_sim.max().item(),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            # 4 device→host syncs + a full-data einsum; skip unless debugging.
+            logger.debug(
+                "[%s] training cos(raw_unit, centroid): mean=%.4f, std=%.4f, min=%.4f, max=%.4f",
+                name,
+                cos_sim.mean().item(),
+                cos_sim.std().item(),
+                cos_sim.min().item(),
+                cos_sim.max().item(),
+            )
 
         # Flip centroids with negative dot products to ensure positive scales
         neg_mask = scales_nz < 0
@@ -706,16 +741,18 @@ def _cluster_block(
         labels_full[~block_zero] = labels_nz
         scales_full = torch.zeros(n_rows, dtype=torch.float32, device=block_data.device)
 
-    unique, counts = torch.unique(labels_nz, return_counts=True)
-    logger.info(
-        "[%s] non-empty clusters: %d/%d, sizes: min=%d, max=%d, mean=%.1f",
-        name,
-        len(unique),
-        k,
-        counts.min().item(),
-        counts.max().item(),
-        counts.float().mean().item(),
-    )
+    if logger.isEnabledFor(logging.DEBUG):
+        # torch.unique over all points + 3 `.item()` syncs; skip unless debugging.
+        unique, counts = torch.unique(labels_nz, return_counts=True)
+        logger.debug(
+            "[%s] non-empty clusters: %d/%d, sizes: min=%d, max=%d, mean=%.1f",
+            name,
+            len(unique),
+            k,
+            counts.min().item(),
+            counts.max().item(),
+            counts.float().mean().item(),
+        )
 
     codebook_b = centroids_kbd.t().contiguous()
     return BlockClusterResult(
