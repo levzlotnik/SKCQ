@@ -401,7 +401,7 @@ def run_one_kmeans(
     W_remainder = W_raw[:, quant_dim:] if remainder_dim > 0 else None
 
     result = build_codebook(
-        rows=W_quant.to(device),
+        rows=W_quant,
         params=params,
         k=K,
         n_blocks=n_blocks,

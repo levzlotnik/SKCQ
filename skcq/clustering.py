@@ -218,7 +218,8 @@ def _assign_to_centroids_l2(
     """Assign each data point to its nearest centroid (l2: min squared distance).
 
     Data stays on its original device; chunks are moved to centroids' device
-    for the matmul, results moved back.
+    for the matmul, results moved back. In-place ops to avoid keeping both
+    `dots` and `dists` alive simultaneously.
     """
     cb = centroids.t() if centroids.shape[0] == data.shape[1] else centroids
     n = data.shape[0]
@@ -227,8 +228,11 @@ def _assign_to_centroids_l2(
     for i in range(0, n, chunk_size):
         end = min(i + chunk_size, n)
         chunk = data[i:end].to(cb.device)
-        dots = chunk @ cb.t()
-        dists = -2 * dots + cb_sq
+        # ||x - c||^2 = ||x||^2 - 2*x·c + ||c||^2
+        # ||x||^2 is constant across centroids, drop it for argmin.
+        # In-place: reuse the dots buffer to avoid 2x VRAM.
+        dists = chunk @ cb.t()
+        dists.mul_(-2).add_(cb_sq)
         labels[i:end] = dists.argmin(dim=-1).to(data.device)
     return labels
 
