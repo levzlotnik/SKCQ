@@ -2,6 +2,7 @@
 // No DOM manipulation, no Plotly. Just fetch wrappers + shared constants.
 
 const BLOCK_SIZES = [8, 10, 12, 16, 24, 32, 64, 128];
+const PROJECTIONS = ["gate", "up", "down"];
 const K_VALUES = [
     16, 32, 64, 128, 256, 512, 1024, 2048,
     4096, 8192, 16384, 32768,

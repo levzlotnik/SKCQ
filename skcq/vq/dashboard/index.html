@@ -27,6 +27,11 @@
     <h2>Hyperparameter range</h2>
 
     <div class="field-row">
+      <label>Projections:</label>
+      <div id="sweep-projections" class="checkbox-group"></div>
+    </div>
+
+    <div class="field-row">
       <label>Target BPW range:</label>
       <div id="bpw-range"></div>
     </div>
@@ -104,6 +109,9 @@
 
     <div class="chart-block">
       <h3>Best error per BPW bucket</h3>
+      <label>Projection:
+        <select id="best-projection"></select>
+      </label>
       <table id="best-table"></table>
     </div>
   </section>
@@ -140,6 +148,7 @@
     $('#btn-requeue').on('click', () => requeueFailed().then(pollStatus));
     $('#btn-shutdown').on('click', () => shutdownSweep().then(updateStatus));
     $('#heatmap-projection').on('change', pollResults);
+    $('#best-projection').on('change', pollResults);
 
     loadRangeIntoUI();
 

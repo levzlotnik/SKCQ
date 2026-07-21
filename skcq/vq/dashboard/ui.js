@@ -152,6 +152,7 @@ function initRangePanel() {
     rs.pK = makeDualSlider("#primary-K", K_VALUES, fmtK);
     rs.sbits = makeDualSlider("#scale-bits", SCALE_BITS_VALUES, String, 0, 6);
     rs.fp = makeCheckboxGroup("#fp-dtypes", FP_DTYPES);
+    rs.proj = makeCheckboxGroup("#sweep-projections", PROJECTIONS);
     rs.resSlots = [];
 
     $('input[name="scale-dtype-type"]').on("change", toggleScaleDtype);
@@ -218,7 +219,7 @@ function buildRangeFromUI() {
     });
 
     return {
-        projection: ["gate", "down"],
+        projection: rs.proj.getChecked(),
         bpw_min: bpwMin,
         bpw_max: bpwMax,
         primary: {
@@ -254,6 +255,10 @@ async function applyRange() {
 async function loadRangeIntoUI() {
     try {
         const r = await fetchRange();
+
+        if (r.projection && r.projection.length) {
+            rs.proj.setChecked(r.projection);
+        }
 
         if (r.primary.metric && r.primary.metric[0]) {
             const val = r.primary.metric[0];
@@ -500,14 +505,19 @@ function renderHeatmap(results, projection) {
     }, { responsive: true });
 }
 
-function renderBestTable(results) {
+function renderBestTable(results, projection) {
     const buckets = [];
     for (let b = 1.0; b < 6.0; b += 0.25) {
         buckets.push([b, b + 0.25]);
     }
-    const projections = [...new Set(results.map(function (r) {
+    const allProjections = [...new Set(results.map(function (r) {
         return r.projection;
     }))].sort();
+    // "all" (empty/falsy selector value) shows every projection side-by-side;
+    // a specific projection filters the table to that one column group.
+    const projections = projection
+        ? allProjections.filter(function (p) { return p === projection; })
+        : allProjections;
 
     let html = "<thead><tr><th>bucket</th>";
     for (const p of projections) {
@@ -578,20 +588,31 @@ function renderResults(results) {
 
     renderPareto(results);
 
-    const $sel = $("#heatmap-projection");
     const projections = [...new Set(results.map(function (r) {
         return r.projection;
-    }))];
+    }))].sort();
 
+    const $sel = $("#heatmap-projection");
     if ($sel.children().length === 0) {
         projections.forEach(function (p) {
             $sel.append($("<option>").val(p).text(p));
         });
     }
 
+    // Best-table projection selector: first option is "all" (side-by-side),
+    // followed by one option per projection present in the results.
+    const $bestSel = $("#best-projection");
+    if ($bestSel.children().length === 0) {
+        $bestSel.append($("<option>").val("").text("all"));
+        projections.forEach(function (p) {
+            $bestSel.append($("<option>").val(p).text(p));
+        });
+    }
+
     const proj = $sel.val() || projections[0];
+    const bestProj = $bestSel.val();
     renderHeatmap(results, proj);
-    renderBestTable(results);
+    renderBestTable(results, bestProj);
 }
 
 // ---------------------------------------------------------------------------
