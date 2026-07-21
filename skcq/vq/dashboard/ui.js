@@ -235,7 +235,11 @@ function buildRangeFromUI() {
 async function applyRange() {
     try {
         const data = await postRange(buildRangeFromUI());
-        $("#apply-banner").text("Changes will apply to next sweep");
+        $("#apply-banner").text(
+            data.applied === "now"
+                ? `Applied: ${data.total} configs, ${data.in_queue} in queue`
+                : "Changes will apply to next sweep",
+        );
         const workers = await fetchWorkers();
         const nWorkers = Math.max(workers.length, 1);
         const hours = ((data.est_configs * 30) / nWorkers / 3600).toFixed(1);
