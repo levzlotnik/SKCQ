@@ -321,11 +321,13 @@ def main() -> None:
     host, port_str = args.orchestrator.rsplit(":", 1)
     port = int(port_str)
     device = resolve_device(args.device)
-    if device.type == "cuda":
+    if device.type == "cuda" and device.index is not None:
         # Bind this process to its assigned physical GPU. The orchestrator hands
-        # each worker an explicit index (e.g. cuda:1 for the second dGPU) rather
-        # than relying on *_VISIBLE_DEVICES remapping, which is unreliable on
-        # ROCm/RDNA4 and would otherwise land every worker on cuda:0.
+        # each multi-GPU worker an explicit index (e.g. cuda:1 for the second
+        # dGPU) rather than relying on *_VISIBLE_DEVICES remapping, which is
+        # unreliable on ROCm/RDNA4 and would otherwise land every worker on
+        # cuda:0. Single-GPU workers pass "auto" (-> indexless "cuda") and need
+        # no pinning — the default device 0 is correct.
         torch.cuda.set_device(device)
     logger.info("VQ worker starting, device=%s, orchestrator=%s:%d", device, host, port)
 
