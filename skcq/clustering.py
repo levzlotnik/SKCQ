@@ -443,7 +443,7 @@ def _euclidean_kmeans(
     labels = _assign_to_centroids_l2(data, centroids.t().contiguous(), chunk_size, device)
 
     logger.info("[%s] k-means done after %d iters", name, it + 1)
-    return centroids, labels.cpu()  # (K, d), (n,)
+    return centroids, labels  # (K, d), (n,) — both on `device`
 
 
 def _norm_weighted_spherical_kmeans(
@@ -532,34 +532,7 @@ def _norm_weighted_spherical_kmeans(
     labels = _assign_to_centroids(unit_data, centroids_t, chunk_size, device)
 
     logger.info("[%s] k-means done after %d iters", name, it + 1)
-    return centroids, labels.cpu()  # (K, d), (n,)
-
-
-def _pick_work_device(
-    n_rows: int,
-    block_size: int,
-    device: torch.device,
-    safety: float = 4.0,
-) -> torch.device:
-    """Choose where the block data lives during k-means.
-
-    Keeping data resident on the GPU turns every ``chunk.to(device)`` in the
-    k-means kernels into a no-op — no PCIe round-trips, no per-chunk host sync —
-    which is what keeps a big-VRAM dGPU (e.g. the 32 GB R9700) busy. We only do
-    this when the fp32 working set comfortably fits in *free* VRAM; otherwise we
-    fall back to CPU-resident data streamed in chunks (the low-VRAM ``serval``
-    path). ``safety`` covers the derived copies held simultaneously: ``.float()``
-    of the input, the unit-normalized copy, the (sub-sampled) train set, and the
-    per-chunk matmul temporaries.
-    """
-    if device.type != "cuda":
-        return torch.device("cpu")
-    fp32_bytes = n_rows * block_size * 4
-    try:
-        free, _total = torch.cuda.mem_get_info(device)
-    except Exception:  # pragma: no cover - driver/platform dependent
-        return torch.device("cpu")
-    return device if fp32_bytes * safety <= free else torch.device("cpu")
+    return centroids, labels  # (K, d), (n,) — both on `device`
 
 
 def _cluster_block(
@@ -590,14 +563,10 @@ def _cluster_block(
             because torch.multinomial (k-means++ init) is limited to 2^24.
     """
     n_rows, block_size = block_data.shape
-    # Residency policy: keep the data resident on the GPU when it fits in free
-    # VRAM (turns per-chunk `.to(device)` into no-ops — no PCIe traffic, keeps a
-    # big-VRAM dGPU busy); otherwise fall back to CPU-streamed chunks for
-    # low-VRAM GPUs. The k-means kernels are already device-agnostic: they move
-    # each chunk to the centroids' device, which is a no-op when already there.
-    work_device = _pick_work_device(n_rows, block_size, device)
-    block_data = block_data.to(work_device)
-    logger.debug("[%s] block data resident on %s (n_rows=%d)", name, work_device, n_rows)
+    # Always run on the compute device. The data stays resident and the k-means
+    # kernels' per-chunk `.to(device)` calls become no-ops (no PCIe round-trips,
+    # no per-chunk host syncs) — this is what keeps the GPU busy.
+    block_data = block_data.to(device)
     block_norms = block_data.norm(dim=-1)
     block_zero = block_norms < norm_threshold
 

@@ -130,7 +130,6 @@ def launch_worker_process(
     name = w["name"]
     venv = w["venv"]
     workdir = w.get("workdir", ".")
-    devices = w.get("devices", [])
 
     common = [
         "--orchestrator",
@@ -147,30 +146,17 @@ def launch_worker_process(
         str(chunk_mb),
     ]
 
-    # GPU pinning: if devices is [idx], pin the worker to that physical GPU
-    # via env vars. CUDA_VISIBLE_DEVICES for NVIDIA, HIP_VISIBLE_DEVICES for
-    # ROCm (which also exposes as cuda in torch). Both set so the worker
-    # sees only one GPU, and cuda:0 = the assigned physical device.
-    if len(devices) == 1:
-        dev_idx = devices[0]
-        gpu_env = {
-            "CUDA_VISIBLE_DEVICES": str(dev_idx),
-            "HIP_VISIBLE_DEVICES": str(dev_idx),
-        }
-    else:
-        gpu_env = {}
-
+    # GPU dispatch: each multi-GPU worker is pinned by explicit torch index
+    # (--device cuda:<idx>, set in the split above), not *_VISIBLE_DEVICES
+    # remapping. The latter is unreliable on ROCm/RDNA4 and silently lands
+    # every worker on physical GPU 0.
     if w["host"] in ("localhost", "127.0.0.1"):
         cmd = [venv, "-m", "skcq.vq.worker", *common]
-        env = {**os.environ, "PYTHONPATH": str(REPO), **gpu_env}
+        env = {**os.environ, "PYTHONPATH": str(REPO)}
         return subprocess.Popen(cmd, cwd=workdir, env=env)
     else:
-        env_prefix = " ".join(f"{k}={v}" for k, v in gpu_env.items())
-        if env_prefix:
-            env_prefix += " "
-        remote = (
-            f"cd {workdir} && git pull --quiet && "
-            f"{env_prefix}{venv} -m skcq.vq.worker " + " ".join(a for a in common)
+        remote = f"cd {workdir} && git pull --quiet && {venv} -m skcq.vq.worker " + " ".join(
+            a for a in common
         )
         return subprocess.Popen(["ssh", "-o", "ConnectTimeout=10", w["host"], remote])
 
@@ -261,6 +247,10 @@ class VQOrchestrator:
                     name = f"{w['name']}-gpu{dev_idx}"
                     w2["name"] = name
                     w2["devices"] = [dev_idx]
+                    # Pin explicitly by torch index instead of *_VISIBLE_DEVICES
+                    # remapping (unreliable on ROCm/RDNA4 — would otherwise put
+                    # every worker on physical GPU 0).
+                    w2["device"] = f"cuda:{dev_idx}"
                     self._worker_configs[name] = w2
             else:
                 self._worker_configs[w["name"]] = dict(w)

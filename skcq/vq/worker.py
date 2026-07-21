@@ -321,6 +321,12 @@ def main() -> None:
     host, port_str = args.orchestrator.rsplit(":", 1)
     port = int(port_str)
     device = resolve_device(args.device)
+    if device.type == "cuda":
+        # Bind this process to its assigned physical GPU. The orchestrator hands
+        # each worker an explicit index (e.g. cuda:1 for the second dGPU) rather
+        # than relying on *_VISIBLE_DEVICES remapping, which is unreliable on
+        # ROCm/RDNA4 and would otherwise land every worker on cuda:0.
+        torch.cuda.set_device(device)
     logger.info("VQ worker starting, device=%s, orchestrator=%s:%d", device, host, port)
 
     # Initialize primary codebook cache
