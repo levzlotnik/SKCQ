@@ -681,11 +681,6 @@ def build_codebook(
     for i, rbs in enumerate(rbs_list):
         if rbs <= 0:
             raise ValueError(f"residual_block_sizes[{i}]={rbs} must be positive")
-        if block_size % rbs != 0 and rbs % block_size != 0:
-            raise ValueError(
-                f"residual_block_sizes[{i}]={rbs} must divide or be a multiple of "
-                f"primary block_size={block_size}"
-            )
     bs_per_codebook = [block_size] + rbs_list
 
     row_norms = rows.norm(dim=-1)
