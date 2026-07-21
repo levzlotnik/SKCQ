@@ -501,8 +501,13 @@ def _cluster_block(
     )
 
     k_eff = min(k, non_zero.shape[0])
+    d = non_zero.shape[1]
     budget_bytes = chunk_budget_mb * 1024 * 1024
-    chunk_size = max(1, budget_bytes // (k_eff * 4))
+    # Each chunk row needs: d*4 bytes (chunk data) + k_eff*4 bytes (matmul output)
+    # Plus cb_sq (k_eff*4) and dists (k_eff*4) — but those are small vs chunk.
+    # Use 2x safety factor for temporaries.
+    bytes_per_row = (d + k_eff) * 4 * 2
+    chunk_size = max(1, budget_bytes // bytes_per_row)
     chunk_size = min(chunk_size, non_zero.shape[0])
 
     # Sub-sample for k-means training if dataset is too large (torch.multinomial
@@ -751,7 +756,9 @@ def build_codebook(
                 # Compute chunk_size from budget (mirrors _cluster_block logic)
                 _budget_bytes = params.chunk_budget_mb * 1024 * 1024
                 _k_eff = max(1, cb_to_device.shape[-1])
-                _chunk = max(1, _budget_bytes // (_k_eff * 4))
+                _d = pooled.shape[1]
+                _bytes_per_row = (_d + _k_eff) * 4 * 2
+                _chunk = max(1, _budget_bytes // _bytes_per_row)
                 if metric == "cosine":
                     labels_full = _assign_to_centroids(
                         pooled, cb_to_device, _chunk, device
