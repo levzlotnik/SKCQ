@@ -468,7 +468,7 @@ function renderHeatmap(results, projection) {
 
     Plotly.newPlot("heatmap-chart", [{
         z: z,
-        x: kVals.map(fmtK),
+        x: kVals.map(function (K) { return Math.log2(K); }),
         y: bsVals.map(String),
         type: "heatmap",
         colorscale: "Viridis_r",
@@ -476,9 +476,14 @@ function renderHeatmap(results, projection) {
         text: txt,
         texttemplate: "%{text}",
         hovertemplate: "bs=%{y} K=%{x}<br>err=%{z:.6f}<br>bpw=%{text}<extra></extra>",
+        customdata: kVals.map(fmtK),
     }], {
         title: `${projection}: block_size × K → error`,
-        xaxis: { title: "K", type: "log" },
+        xaxis: {
+            title: "K",
+            tickvals: kVals.map(function (K) { return Math.log2(K); }),
+            ticktext: kVals.map(fmtK),
+        },
         yaxis: { title: "block_size" },
         height: 420,
     }, { responsive: true });
