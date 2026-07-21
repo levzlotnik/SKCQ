@@ -166,7 +166,6 @@ def main() -> None:
     parser.add_argument("--layer", type=int, default=24)
     parser.add_argument("--port", type=int, default=5555, help="TCP port for workers")
     parser.add_argument("--http-port", type=int, default=8050, help="HTTP port for dashboard")
-    parser.add_argument("--auto-launch", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -180,8 +179,7 @@ def main() -> None:
         layer=args.layer,
         port=args.port,
     )
-    if args.auto_launch:
-        orch.launch()
+    orch.start()
 
     app = create_app(orch)
     print(f"Dashboard: http://localhost:{args.http_port}/  (worker TCP: {args.port})")

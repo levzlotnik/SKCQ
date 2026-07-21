@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import queue
-import shlex
 import socket
 import sqlite3
 import subprocess
@@ -210,7 +209,8 @@ class VQOrchestrator:
         self._init_workers_from_yaml()
 
     def _init_workers_from_yaml(self) -> None:
-        """Pre-populate workers_state from YAML so dashboard shows workers before launch."""
+        """Pre-populate workers_state from YAML so dashboard shows workers before launch.
+        All workers start disabled — user enables them manually via dashboard."""
         raw = load_workers_yaml(self.workers_yaml)
         for w in raw.get("workers", []):
             devices = w.get("devices", [])
@@ -218,10 +218,12 @@ class VQOrchestrator:
                 for dev_idx in devices:
                     name = f"{w['name']}-gpu{dev_idx}"
                     ws = WorkerState(name=name, host=w.get("host", "localhost"))
+                    ws.enabled = False
                     self.workers_state[name] = ws
             else:
                 name = w["name"]
                 ws = WorkerState(name=name, host=w.get("host", "localhost"))
+                ws.enabled = False
                 self.workers_state[name] = ws
 
     def _rebuild_queue(self) -> None:
@@ -243,6 +245,69 @@ class VQOrchestrator:
         )
 
     # --- control plane ---
+
+    def start(self) -> None:
+        """Bind TCP server + launch worker processes. Called once at startup,
+        before any jobs are dispatched. Workers connect and sit idle waiting
+        for ReadyMessage acknowledgments until launch() is called."""
+        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_sock.bind(("0.0.0.0", self.port))
+        self.server_sock.listen(16)
+        logger.info("TCP server listening on 0.0.0.0:%d", self.port)
+
+        # Launch worker processes — they connect and wait for jobs
+        raw_workers = load_workers_yaml(self.workers_yaml)
+        workers = raw_workers.get("workers", [])
+
+        expanded = []
+        for w in workers:
+            devices = w.get("devices", [])
+            if devices:
+                for dev_idx in devices:
+                    w2 = dict(w)
+                    w2["name"] = f"{w['name']}-gpu{dev_idx}"
+                    w2["devices"] = [dev_idx]
+                    expanded.append(w2)
+            else:
+                expanded.append(w)
+
+        for w in expanded:
+            try:
+                proc = launch_worker_process(
+                    w, self.port, self.orchestrator_host, self.model_id, self.layer
+                )
+            except (OSError, FileNotFoundError) as e:
+                logger.error("Failed to launch %s: %s", w["name"], e)
+                ws = self.workers_state.get(w["name"])
+                if ws is not None:
+                    ws.connected = False
+                continue
+            self.worker_procs.append(proc)
+            ws = self.workers_state.get(w["name"])
+            if ws is None:
+                ws = WorkerState(name=w["name"], host=w["host"])
+                self.workers_state[w["name"]] = ws
+            ws.proc = proc
+            logger.info("Launched %s (pid=%d)", w["name"], proc.pid)
+
+        # Accept worker connections in background (they connect immediately,
+        # send WorkerInfoMessage + heartbeats, then wait for ReadyMessage)
+        threading.Thread(target=self._accept_loop, daemon=True, name="accept").start()
+
+    def _accept_loop(self) -> None:
+        while not self.shutdown.is_set() and self.server_sock is not None:
+            try:
+                self.server_sock.settimeout(2.0)
+                conn, addr = self.server_sock.accept()
+                threading.Thread(
+                    target=self._handle_worker, args=(conn, addr), daemon=True
+                ).start()
+            except TimeoutError:
+                continue
+            except OSError:
+                if self.shutdown.is_set():
+                    break
 
     def launch(self) -> str:
         if self.state in ("running", "paused"):
@@ -328,68 +393,21 @@ class VQOrchestrator:
     # --- TCP server ---
 
     def _run(self) -> None:
-        # Bind TCP server BEFORE launching workers — local workers can
-        # connect within ~1s of weight loading, and the server must be
-        # ready by then. (Old skcq/orchestrator.py does the same.)
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.bind(("0.0.0.0", self.port))
-        self.server_sock.listen(16)
-        logger.info("TCP server listening on 0.0.0.0:%d", self.port)
-
-        raw_workers = load_workers_yaml(self.workers_yaml)
-        workers = raw_workers.get("workers", [])
-
-        # Expand multi-device workers into per-device entries
-        expanded = []
-        for w in workers:
-            devices = w.get("devices", [])
-            if devices:
-                for dev_idx in devices:
-                    w2 = dict(w)
-                    w2["name"] = f"{w['name']}-gpu{dev_idx}"
-                    w2["devices"] = [dev_idx]
-                    expanded.append(w2)
-            else:
-                expanded.append(w)
-
-        for w in expanded:
-            try:
-                proc = launch_worker_process(
-                    w, self.port, self.orchestrator_host, self.model_id, self.layer
-                )
-            except (OSError, FileNotFoundError) as e:
-                logger.error("Failed to launch %s: %s", w["name"], e)
-                ws = self.workers_state.get(w["name"])
-                if ws is not None:
-                    ws.connected = False
-                continue
-            self.worker_procs.append(proc)
-            ws = self.workers_state.get(w["name"])
-            if ws is None:
-                ws = WorkerState(name=w["name"], host=w["host"])
-                self.workers_state[w["name"]] = ws
-            ws.proc = proc
-            logger.info("Launched %s (pid=%d)", w["name"], proc.pid)
-
-        threads: list[threading.Thread] = []
+        """Job dispatch loop — runs in background after launch() is called.
+        Workers are already connected (via start()), sitting idle waiting
+        for ReadyMessage acknowledgments."""
         try:
             while not self.shutdown.is_set() and self.completed + len(self.failed) < self.total:
-                try:
-                    self.server_sock.settimeout(2.0)
-                    conn, addr = self.server_sock.accept()
-                    t = threading.Thread(target=self._handle_worker, args=(conn, addr), daemon=True)
-                    t.start()
-                    threads.append(t)
-                except TimeoutError:
-                    continue
-                except OSError:
-                    if self.shutdown.is_set():
-                        break
+                time.sleep(1)
         finally:
             self.shutdown.set()
-            for t in threads:
-                t.join(timeout=5)
+            for proc in self.worker_procs:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
             if self.server_sock:
                 self.server_sock.close()
             logger.info(
@@ -441,8 +459,13 @@ class VQOrchestrator:
                 elif isinstance(msg, ReadyMessage):
                     ws = self.workers_state.get(worker_name)
                     if ws and not ws.enabled:
-                        send_frame(conn, DisableMessage())
-                        return
+                        # Disabled: stay connected (heartbeats + GPU info)
+                        # but don't dispatch jobs. Wait for enable.
+                        while not self.shutdown.is_set() and not ws.enabled:
+                            time.sleep(0.5)
+                        if self.shutdown.is_set():
+                            send_frame(conn, DoneMessage())
+                            return
                     while not self.shutdown.is_set():
                         if self.pause_event.is_set():
                             time.sleep(0.5)
