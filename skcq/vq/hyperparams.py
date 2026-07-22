@@ -15,7 +15,6 @@ Core types:
 from __future__ import annotations
 
 import hashlib
-import math
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -103,7 +102,9 @@ class VQConfig:
 
     @property
     def est_bpw(self) -> float:
-        """Estimated bits per weight (mirrors runner.bits_per_weight_kmeans)."""
+        """Estimated bits per weight (delegates to ``skcq.vq.bpw``)."""
+        from skcq.vq.bpw import bits_per_weight_kmeans
+
         n_rows, in_dim = MODEL_DIMS[self.projection]
         block_size = self.primary.block_size
         n_blocks = in_dim // block_size
@@ -112,32 +113,26 @@ class VQConfig:
         scale_bits_map = {"int8": 8, "fp16": 16, "bf16": 16, "fp8_e4m3": 8, "fp8_e5m2": 8}
         scale_bits_per_elem = scale_bits_map.get(self.primary.scale_dtype or "bf16", 16)
 
-        codebook_bits_per_elem = 16  # codebook always stored in original dtype
-        codebook_bits_total = 0
-        assign_bits = 0
-        remainder_bits = 0
-        sign_bits = 0
-        specs = [self.primary, *self.residuals]
-        for spec in specs:
-            bs_c = spec.block_size
-            n_blocks_c = in_dim // bs_c
-            cov_c = n_blocks_c * bs_c
-            rem_c = in_dim - cov_c
-            n_cb_c = 1  # always shared in the sweep
-            codebook_bits_total += n_cb_c * spec.K * bs_c * codebook_bits_per_elem
-            if spec.K <= 1:
-                assign_bits += n_rows * n_blocks_c * 1
-            else:
-                assign_bits += n_rows * n_blocks_c * math.ceil(math.log2(spec.K))
-            remainder_bits += 16 * n_rows * rem_c  # bf16 raw remainder
-            if spec.sign_split:
-                sign_bits += n_rows * cov_c  # 1 bit per covered element (this codebook)
+        bs_per_codebook = [self.primary.block_size] + [r.block_size for r in self.residuals]
+        k_per_codebook = [self.primary.K] + [r.K for r in self.residuals]
+        sign_split = bool(self.primary.sign_split) if self.primary.sign_split is not None else False
+        residual_sign_split = [bool(r.sign_split) for r in self.residuals] or None
+        metric = self.primary.metric or "cosine"
 
-        # Scales: one per primary block.
-        scale_bits = n_rows * n_blocks * scale_bits_per_elem
-
-        total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits + remainder_bits
-        return total_bits / (n_rows * in_dim)
+        return bits_per_weight_kmeans(
+            n_rows=n_rows,
+            in_dim=in_dim,
+            n_blocks=n_blocks,
+            block_size=block_size,
+            n_codebooks=1 + len(self.residuals),
+            k_per_codebook=k_per_codebook,
+            shared_codebook=True,  # always shared in the sweep
+            sign_split=sign_split,
+            scale_bits_per_elem=scale_bits_per_elem,
+            bs_per_codebook=bs_per_codebook,
+            residual_sign_split=residual_sign_split,
+            primary_metric=metric,
+        )
 
     @property
     def est_runtime_s(self) -> float:

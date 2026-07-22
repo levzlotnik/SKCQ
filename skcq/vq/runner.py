@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import json
 import logging
-import math
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
-from skcq.clustering import CodebookParams, build_codebook
+from skcq.clustering import CodebookParams, DistanceMetric, build_codebook
+from skcq.vq.bpw import bits_per_weight_kmeans
 
 logger = logging.getLogger("skcq.vq.runner")
 
@@ -173,16 +175,18 @@ def quant_fp8_e5m2(W: torch.Tensor) -> tuple[torch.Tensor, float]:
     return W.to(torch.float8_e5m2).to(W.dtype), 8.0
 
 
-def integer_schemes(block_size: int) -> list[tuple[str, callable]]:
+def integer_schemes(
+    block_size: int,
+) -> list[tuple[str, Callable[[torch.Tensor], tuple[torch.Tensor, float]]]]:
     """Build list of (name, quant_fn) pairs. quant_fn(W) -> (recon, bpw)."""
-    schemes: list[tuple[str, callable]] = []
+    schemes: list[tuple[str, Callable[[torch.Tensor], tuple[torch.Tensor, float]]]] = []
     for bits in [2, 3, 4, 8]:
-        schemes.append((f"int{bits}_per_tensor", lambda W, b=bits: quant_intN_per_tensor(W, b)))
-        schemes.append((f"int{bits}_per_channel", lambda W, b=bits: quant_intN_per_channel(W, b)))
+        schemes.append((f"int{bits}_per_tensor", partial(quant_intN_per_tensor, bits=bits)))
+        schemes.append((f"int{bits}_per_channel", partial(quant_intN_per_channel, bits=bits)))
         schemes.append(
             (
                 f"int{bits}_per_block{block_size}",
-                lambda W, b=bits, bs=block_size: quant_intN_per_block(W, b, bs),
+                partial(quant_intN_per_block, bits=bits, block_size=block_size),
             )
         )
     schemes.append(("fp8_e4m3", quant_fp8_e4m3))
@@ -257,66 +261,6 @@ def quantize_scales(scales: torch.Tensor, dtype: str) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-def bits_per_weight_kmeans(
-    n_rows: int,
-    in_dim: int,
-    n_blocks: int,
-    block_size: int,
-    n_codebooks: int,
-    k_per_codebook: list[int],
-    shared_codebook: bool = False,
-    sign_split: bool = False,
-    scale_bits_per_elem: int = 16,
-    bs_per_codebook: list[int] | None = None,
-    codebook_bits: int = 16,
-    residual_sign_split: bool | list[bool] | None = None,
-) -> float:
-    """Compute effective bits per weight for k-means quantization.
-
-    Accounts per codebook for: codebook storage, assignment indices, the raw
-    (bf16) remainder columns (in_dim % bs_c), and — for any codebook with
-    sign-split enabled — 1 sign bit per covered element (Σ_c n_rows·cov_c).
-    Scales are primary-only. ``sign_split`` is the primary flag;
-    ``residual_sign_split`` (bool or per-residual list) covers c>=1.
-    """
-    if bs_per_codebook is None:
-        bs_per_codebook = [block_size] * n_codebooks
-
-    # Per-codebook sign-split flags: primary + residuals.
-    if residual_sign_split is None:
-        res_ss = [False] * (n_codebooks - 1)
-    elif isinstance(residual_sign_split, bool):
-        res_ss = [residual_sign_split] * (n_codebooks - 1)
-    else:
-        res_ss = list(residual_sign_split)[: n_codebooks - 1]
-        res_ss += [False] * (n_codebooks - 1 - len(res_ss))
-    ss_per_codebook = [sign_split, *res_ss]
-
-    codebook_bits_total = 0
-    assign_bits = 0
-    remainder_bits = 0
-    sign_bits = 0
-    for c, (bs_c, k_c) in enumerate(zip(bs_per_codebook, k_per_codebook, strict=True)):
-        n_blocks_c = in_dim // bs_c
-        cov_c = n_blocks_c * bs_c
-        rem_c = in_dim - cov_c
-        n_cb_c = 1 if shared_codebook else n_blocks_c
-        codebook_bits_total += n_cb_c * k_c * bs_c * codebook_bits
-        if k_c <= 1:
-            assign_bits += n_rows * n_blocks_c * 1
-        else:
-            assign_bits += n_rows * n_blocks_c * math.ceil(math.log2(k_c))
-        remainder_bits += n_rows * rem_c * 16  # bf16 raw remainder
-        if ss_per_codebook[c]:
-            sign_bits += n_rows * cov_c  # 1 bit per covered element
-
-    scale_bits = n_rows * n_blocks * scale_bits_per_elem  # primary blocks only
-
-    total_bits = codebook_bits_total + assign_bits + scale_bits + sign_bits + remainder_bits
-    total_weights = n_rows * in_dim
-    return total_bits / total_weights
-
-
 # ---------------------------------------------------------------------------
 # Single-config VQ run
 # ---------------------------------------------------------------------------
@@ -332,7 +276,7 @@ def run_one_kmeans(
     block_size: int,
     K: int,
     n_codebooks: int,
-    metric: str,
+    metric: DistanceMetric,
     shared_codebook: bool = False,
     sign_split: bool = False,
     max_iters: int = 100,
@@ -478,6 +422,7 @@ def run_one_kmeans(
         bs_per_codebook=bs_per_codebook,
         codebook_bits=codebook_bits,
         residual_sign_split=res_ss,
+        primary_metric=metric,
     )
     comp_ratio = 16.0 / bpw
 

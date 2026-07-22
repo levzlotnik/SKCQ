@@ -151,6 +151,12 @@ def reconstruct_codebooks(
     n_blocks_0 = in_dim // bs_0
     cov_0 = n_blocks_0 * bs_0
 
+    # Euclidean primary carries no scale (centroids ARE the reconstruction);
+    # multiplying them by the all-zero scales would zero out the output. Detect
+    # once and skip the multiply in the per-chunk loop below. Cheaper and
+    # more robust than threading a `primary_metric` flag through every caller.
+    primary_uses_scale = bool(scales.any().item())
+
     if chunk_rows is None:
         # ~128 MiB fp32 working set per chunk (independent of expert count).
         chunk_rows = max(1, (128 * 1024 * 1024) // (max(1, in_dim) * 4))
@@ -165,12 +171,17 @@ def reconstruct_codebooks(
         rc = r1 - r0
 
         # Primary: scale ⊙ dir over covered_0 (first-orthant if sign_split), signs.
+        # When the primary metric is euclidean, scales are all zero (centroids
+        # ARE the reconstruction) and the scale-multiply would zero it out —
+        # skip it. Detect this once by checking if scales is identically zero;
+        # cheaper than threading the metric flag through the call signature and
+        # correct for both build_codebook and CodebookResult.reconstruct.
         prim = torch.empty(rc, cov_0, dtype=torch.float32, device=device)
         for b in range(n_blocks_0):
             cb = cbs_dev[0][0] if shared_codebook else cbs_dev[0][b]
             d = cb.t()[assignments[0][b][r0:r1].to(device)]  # (rc, bs_0)
             sc_b = scales[r0:r1, b].float().to(device).unsqueeze(-1)
-            prim[:, b * bs_0 : (b + 1) * bs_0] = sc_b * d
+            prim[:, b * bs_0 : (b + 1) * bs_0] = sc_b * d if primary_uses_scale else d
         if sign_bits is not None and sign_bits[0] is not None:
             prim *= sign_bits[0][r0:r1].reshape(rc, cov_0).float().to(device)
         recon[r0:r1, :cov_0] += prim
@@ -1001,11 +1012,19 @@ def build_codebook(
         cb_assignments.append(asg)
 
         if c == 0:
-            # scale_0 = dot(folded_block, unit_dir) per (row, block)
-            dot = torch.einsum("nbd,nbd->nb", data, assigned)  # (n_rows, n_blocks_0)
-            dot[zero_mask] = 0.0
-            scales_flat = dot
-            prim = (scales_flat.unsqueeze(-1) * assigned).reshape(n_rows, cov_0)
+            if distance_metric == "cosine":
+                # Cosine: codebook holds unit-norm directions; per-(row, block)
+                # scale = dot(data, unit_dir) recovers magnitude.
+                dot = torch.einsum("nbd,nbd->nb", data, assigned)  # (n_rows, n_blocks_0)
+                dot[zero_mask] = 0.0
+                scales_flat = dot
+                prim = (scales_flat.unsqueeze(-1) * assigned).reshape(n_rows, cov_0)
+            else:
+                # Euclidean: codebook holds raw centroids (direct reconstruction);
+                # scale is unused and must stay zero. Multiplying the centroid by
+                # dot(data, centroid) would corrupt the reconstruction.
+                scales_flat = torch.zeros(n_rows, n_blocks_0, dtype=torch.float32, device=device)
+                prim = assigned.reshape(n_rows, cov_0)
             if signs_list[0] is not None:
                 prim = prim * signs_list[0]
             recon_total[:, :cov_0] += prim
@@ -1069,25 +1088,29 @@ def build_codebook(
     # where pdir_b is the (signed) primary direction. We store the SIGNED scale
     # (equivalent to the "flip dir when dot<0" trick, but consistent with the
     # shared unflipped-centroid helper).
-    for b in range(n_blocks_0):
-        cols = slice(b * bs_0, (b + 1) * bs_0)
-        cb0 = cb_codebooks[0][0] if shared_codebook else cb_codebooks[0][b]
-        d = cb0.float().t()[cb_assignments[0][b].to(cb0.device)].to(device)  # (n_rows, bs_0)
-        d = d.clone()
-        d[zero_mask] = 0.0
-        if signs_list[0] is not None:
-            s0 = signs_list[0]
-            assert s0 is not None
-            pdir = d * s0[:, b * bs_0 : (b + 1) * bs_0]
-        else:
-            pdir = d
-        scale_old = scales_flat[:, b]
-        other_b = recon_total[:, cols] - scale_old.unsqueeze(-1) * pdir
-        target = raw[:, cols] - other_b
-        dot = torch.einsum("nd,nd->n", target, pdir)
-        scale_new = dot / (pdir.norm(dim=-1) ** 2 + 1e-10)
-        scale_new[zero_mask] = 0.0
-        scales_flat[:, b] = scale_new
+    #
+    # Euclidean primary has no scale by construction (centroids ARE the
+    # reconstruction); skip the re-fit entirely — scales_flat is already zeros.
+    if distance_metric == "cosine":
+        for b in range(n_blocks_0):
+            cols = slice(b * bs_0, (b + 1) * bs_0)
+            cb0 = cb_codebooks[0][0] if shared_codebook else cb_codebooks[0][b]
+            d = cb0.float().t()[cb_assignments[0][b].to(cb0.device)].to(device)  # (n_rows, bs_0)
+            d = d.clone()
+            d[zero_mask] = 0.0
+            if signs_list[0] is not None:
+                s0 = signs_list[0]
+                assert s0 is not None
+                pdir = d * s0[:, b * bs_0 : (b + 1) * bs_0]
+            else:
+                pdir = d
+            scale_old = scales_flat[:, b]
+            other_b = recon_total[:, cols] - scale_old.unsqueeze(-1) * pdir
+            target = raw[:, cols] - other_b
+            dot = torch.einsum("nd,nd->n", target, pdir)
+            scale_new = dot / (pdir.norm(dim=-1) ** 2 + 1e-10)
+            scale_new[zero_mask] = 0.0
+            scales_flat[:, b] = scale_new
 
     assignments_out: list[torch.Tensor] = [a.cpu() for a in cb_assignments]
     codebooks_out = [cb.cpu() for cb in cb_codebooks]
