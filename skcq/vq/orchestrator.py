@@ -400,21 +400,18 @@ class VQOrchestrator:
     def _run(self) -> None:
         """Job dispatch loop — runs in background after launch() is called.
         Workers are already connected (via start()), sitting idle waiting
-        for ReadyMessage acknowledgments."""
-        try:
-            while not self.shutdown.is_set() and self.completed + len(self.failed) < self.total:
-                time.sleep(1)
-        finally:
-            self.shutdown.set()
-            for proc in self.worker_procs:
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-            if self.server_sock:
-                self.server_sock.close()
+        for ReadyMessage acknowledgments.
+
+        On natural sweep completion: return to idle, keep workers alive and
+        the server socket open so the user can change the range and launch
+        again without reconnecting. Only ``shutdown_now()`` tears down the
+        long-lived infrastructure (sets ``self.shutdown``, which exits the
+        loop below, and then we do full worker-kill + socket-close here)."""
+        while not self.shutdown.is_set() and self.completed + len(self.failed) < self.total:
+            time.sleep(1)
+
+        if not self.shutdown.is_set():
+            # Sweep completed naturally — keep everything alive, return to idle.
             logger.info(
                 "Sweep complete: %d/%d done, %d failed",
                 self.completed,
@@ -422,6 +419,27 @@ class VQOrchestrator:
                 len(self.failed),
             )
             self.state = "idle"
+            return
+
+        # Explicit shutdown: tear down workers + server socket. (shutdown_now
+        # already sent DisableMessages and terminated procs — the kills here
+        # are idempotent, just in case any proc survived.)
+        for proc in self.worker_procs:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        if self.server_sock:
+            self.server_sock.close()
+        logger.info(
+            "Sweep terminated: %d/%d done, %d failed",
+            self.completed,
+            self.total,
+            len(self.failed),
+        )
+        self.state = "idle"
 
     def _handle_worker(self, conn: socket.socket, addr) -> None:
         worker_name = f"{addr[0]}:{addr[1]}"
