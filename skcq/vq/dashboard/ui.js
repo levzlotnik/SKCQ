@@ -133,7 +133,7 @@ function makeCheckboxGroup(sel, values, formatter) {
 // ---------------------------------------------------------------------------
 
 const BPW_VALUES = [];
-for (let b = 1.0; b <= 6.0 + 1e-9; b += 0.1) {
+for (let b = 0.0; b <= 6.0 + 1e-9; b += 0.1) {
     BPW_VALUES.push(Math.round(b * 10) / 10);
 }
 
