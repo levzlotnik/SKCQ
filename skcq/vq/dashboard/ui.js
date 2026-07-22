@@ -433,7 +433,7 @@ function renderPareto(results) {
 
     Plotly.newPlot("pareto-chart", traces, {
         title: "Pareto frontier: bpw vs error",
-        xaxis: { title: "bits per weight" },
+        xaxis: { title: "bits per weight", rangemode: "tozero" },
         yaxis: { title: "rel Frobenius error" },
         hovermode: "closest",
         height: 420,
@@ -507,7 +507,7 @@ function renderHeatmap(results, projection) {
 
 function renderBestTable(results, projection) {
     const buckets = [];
-    for (let b = 1.0; b < 6.0; b += 0.25) {
+    for (let b = 0.0; b < 6.0; b += 0.25) {
         buckets.push([b, b + 0.25]);
     }
     const allProjections = [...new Set(results.map(function (r) {
