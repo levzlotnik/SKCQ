@@ -679,6 +679,19 @@ function renderGPUCards(workers) {
             );
         }
 
+        if (w.progress) {
+            const p = w.progress;
+            $card.append(
+                $('<div class="job-progress">').text(
+                    `c=${p.codebook_idx}/${p.n_codebooks} ` +
+                    `block ${p.block_idx}/${p.n_blocks} ` +
+                    `iter ${p.iter}/${p.max_iters} ` +
+                    `moved=${p.moved.toFixed(6)} ` +
+                    `empty=${p.n_empty}`,
+                ),
+            );
+        }
+
         $card.append($(`<div class="gpu-chart" id="gpu-chart-${w.name}">`));
         $container.append($card);
 

@@ -27,7 +27,8 @@ import torch
 from jsonrpc import JSONRPCResponseManager
 from jsonrpc.dispatcher import Dispatcher
 
-from skcq.clustering import CodebookParams, build_codebook
+from skcq.clustering import CodebookParams
+from skcq.experiment import CodebookConfig, CodebookExperiment
 
 
 class ProgressNotificationHandler(logging.Handler):
@@ -94,17 +95,18 @@ class CudaServer:
         else:
             return {"status": "error", "msg": f"unknown transport: {transport}"}
 
-        result = build_codebook(
-            rows=rows,
-            params=cb_params,
-            k=k,
-            n_blocks=n_blocks,
-            n_codebooks=n_codebooks,
-            num_experts=num_experts,
-            out_dim=out_dim,
-            device=torch.device("cuda"),
-            name=name,
-        )
+        result = CodebookExperiment(
+            CodebookConfig(
+                params=cb_params,
+                k=k,
+                n_blocks=n_blocks,
+                n_codebooks=n_codebooks,
+                num_experts=num_experts,
+                out_dim=out_dim,
+                device=torch.device("cuda"),
+                name=name,
+            )
+        ).fit(rows=rows)
 
         if transport == "file":
             assert out_path is not None

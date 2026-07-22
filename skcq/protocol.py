@@ -39,6 +39,7 @@ Message = Union[
     "CacheRequestMessage",
     "CacheResponseMessage",
     "CacheStoreMessage",
+    "ProgressMessage",
 ]
 
 
@@ -230,6 +231,25 @@ class CacheStoreMessage:
 
     key: str
     codebook: torch.Tensor
+
+
+@dataclass
+class ProgressMessage:
+    """Worker → Orch: live k-means iteration progress (no reply expected).
+
+    Sent on every ``CodebookIterEvent`` — no throttling. The orchestrator
+    stores the latest snapshot in ``WorkerState.progress`` for the dashboard.
+    """
+
+    worker_name: str
+    codebook_idx: int
+    n_codebooks: int
+    block_idx: int
+    n_blocks: int
+    iter: int
+    max_iters: int
+    moved: float
+    n_empty: int
 
 
 @dataclass

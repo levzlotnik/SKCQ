@@ -23,8 +23,9 @@ from skcq.vq.runner import (
     integer_schemes,
     load_model_config,
     parse_scale_dtype,
-    run_one_kmeans,
 )
+from skcq.experiment import KmeansDoneEvent, KmeansIterEvent, KmeansStartEvent, TqdmListener
+from skcq.vq.experiment import VQRunConfig, VQRunExperiment
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -126,8 +127,7 @@ def main() -> None:
                 }
             )
 
-        result = run_one_kmeans(
-            W_raw=W_raw,
+        vq_config = VQRunConfig(
             projection=proj_name,
             in_dim=in_dim,
             num_experts=num_experts,
@@ -138,6 +138,7 @@ def main() -> None:
             n_codebooks=args.n_codebooks,
             metric=args.metric,
             residual_k=args.residual_k,
+            residual_sign_split=None,
             shared_codebook=args.shared,
             sign_split=args.sign_split,
             max_iters=args.kmeans_iters,
@@ -148,6 +149,12 @@ def main() -> None:
             device=device,
             chunk_budget_mb=args.chunk_budget_mb,
         )
+        exp = VQRunExperiment(vq_config)
+        tqdm_listener = TqdmListener()
+        exp.on(KmeansStartEvent, tqdm_listener.on_start)
+        exp.on(KmeansIterEvent, tqdm_listener.on_iter)
+        exp.on(KmeansDoneEvent, tqdm_listener.on_done)
+        result = exp.fit(W_raw)
         all_results.append(result)
         del W_raw
 

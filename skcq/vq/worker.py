@@ -55,7 +55,7 @@ from skcq.protocol import (
     send_frame,
 )
 from skcq.vq.cache import RemotePrimaryCodebookCache
-from skcq.vq.runner import integer_schemes, load_model_config, run_one_kmeans
+from skcq.vq.runner import integer_schemes, load_model_config
 from worker import build_layer_shard_map, extract_rows, resolve_device
 
 logger = logging.getLogger("vq.worker")
@@ -230,13 +230,15 @@ def process_vq_job(
     device: torch.device,
     chunk_budget_mb: int,
     cache: RemotePrimaryCodebookCache | None,
+    sock: socket.socket,
+    sock_lock: threading.Lock,
+    worker_name: str,
 ) -> dict:
     """Run one VQ config in-process. Returns the CSV row dict."""
     cfg = job.config
     in_dim = in_dims[cfg.projection]
     W_raw = rows_map[cfg.projection]
 
-    # Derive params for run_one_kmeans from VQConfig
     primary = cfg.primary
     residual_block_sizes = [r.block_size for r in cfg.residuals] if cfg.residuals else None
     residual_k = [r.K for r in cfg.residuals] if cfg.residuals else None
@@ -245,13 +247,20 @@ def process_vq_job(
     scale_dtype = primary.scale_dtype or "bf16"
     sign_split = bool(primary.sign_split) if primary.sign_split is not None else False
 
-    # Build cache key for primary (if caching is enabled)
     cache_key_str = None
     if cache is not None:
         cache_key_str = primary.cache_key(layer_idx, cfg.projection)
 
-    result = run_one_kmeans(
-        W_raw=W_raw,
+    from skcq.experiment import (
+        CodebookIterEvent,
+        KmeansDoneEvent,
+        KmeansIterEvent,
+        KmeansStartEvent,
+        TqdmListener,
+    )
+    from skcq.vq.experiment import VQRunConfig, VQRunExperiment, WireListener
+
+    vq_config = VQRunConfig(
         projection=cfg.projection,
         in_dim=in_dim,
         num_experts=num_experts,
@@ -268,14 +277,26 @@ def process_vq_job(
         max_iters=job.kmeans_iters,
         scale_dtype=scale_dtype,
         residual_block_sizes=residual_block_sizes,
-        codebook_bits=16,  # always original dtype
+        codebook_bits=16,
         layer_idx=layer_idx,
         device=device,
         chunk_budget_mb=chunk_budget_mb,
         primary_codebook_cache=cache,
         cache_key_str=cache_key_str,
     )
-    return result
+    exp = VQRunExperiment(vq_config)
+
+    # Wire listener: send ProgressMessage on every CodebookIterEvent
+    wire = WireListener(sock, sock_lock, worker_name)
+    exp.on(CodebookIterEvent, wire.on_iter)
+
+    # Tqdm listener for stderr (explicit, as requested)
+    tqdm_listener = TqdmListener()
+    exp.on(KmeansStartEvent, tqdm_listener.on_start)
+    exp.on(KmeansIterEvent, tqdm_listener.on_iter)
+    exp.on(KmeansDoneEvent, tqdm_listener.on_done)
+
+    return exp.fit(W_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +515,9 @@ def main() -> None:
                     device,
                     args.chunk_budget_mb,
                     cache,
+                    sock,
+                    sock_lock,
+                    args.name,
                 )
                 with sock_lock:
                     send_frame(

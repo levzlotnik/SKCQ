@@ -10,9 +10,10 @@ from collections.abc import Mapping
 
 import torch
 
-from skcq.clustering import CodebookResult, build_codebook
+from skcq.clustering import CodebookResult
 from skcq.config import CodebookParams, LayerOverride
 from skcq.eval_model import get_text_model
+from skcq.experiment import CodebookConfig, CodebookExperiment
 from skcq.rocm_client import RocmClient
 
 logger = logging.getLogger(__name__)
@@ -103,17 +104,18 @@ def extract_and_build_codebooks(
                     name=cb_name,
                 )
             else:
-                layer_result[name] = build_codebook(
-                    rows,
-                    params=layer_params,
-                    k=k,
-                    n_blocks=n_blocks,
-                    n_codebooks=layer_params.n_codebooks,
-                    num_experts=num_experts,
-                    out_dim=out_dim,
-                    device=device,
-                    name=cb_name,
-                )
+                layer_result[name] = CodebookExperiment(
+                    CodebookConfig(
+                        params=layer_params,
+                        k=k,
+                        n_blocks=n_blocks,
+                        n_codebooks=layer_params.n_codebooks,
+                        num_experts=num_experts,
+                        out_dim=out_dim,
+                        device=device,
+                        name=cb_name,
+                    )
+                ).fit(rows)
 
         results.append(layer_result)
 

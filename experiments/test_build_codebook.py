@@ -10,7 +10,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from skcq.clustering import build_codebook, CodebookParams
+from skcq.clustering import CodebookParams
+from skcq.experiment import CodebookConfig, CodebookExperiment
 
 # Load real data
 MODEL_ID = "Qwen/Qwen3.6-35B-A3B"
@@ -67,18 +68,19 @@ params = CodebookParams(
 # Instead, let's just use n_rows directly and set num_experts=n_rows, out_dim=1
 
 # Use real dimensions: num_experts=256, out_dim=512 (since 256*512=131072)
-result = build_codebook(
-    rows=W.to(torch.device("cuda:0")),
-    params=params,
-    k=K,
-    n_blocks=n_blocks,
-    n_codebooks=1,
-    num_experts=256,
-    out_dim=512,
-    device=torch.device("cuda:0"),
-    name="test_build_codebook",
-    distance_metric="cosine",
-)
+result = CodebookExperiment(
+    CodebookConfig(
+        params=params,
+        k=K,
+        n_blocks=n_blocks,
+        n_codebooks=1,
+        num_experts=256,
+        out_dim=512,
+        device=torch.device("cuda:0"),
+        name="test_build_codebook",
+        metric="cosine",
+    )
+).fit(W.to(torch.device("cuda:0")))
 
 print(f"Result codebooks: {len(result.codebooks)}")
 print(f"Result assignments: {len(result.assignments)}")

@@ -33,6 +33,7 @@ from skcq.protocol import (
     DoneMessage,
     HeartbeatMessage,
     Message,
+    ProgressMessage,
     ReadyMessage,
     VQErrorMessage,
     VQJobMessage,
@@ -177,6 +178,7 @@ class WorkerState:
         self.devices: list[dict] = []  # DeviceInfo as dict
         self.heartbeats: deque = deque(maxlen=HEARTBEAT_BUFFER_SIZE)
         self.current_job: str | None = None
+        self.progress: ProgressMessage | None = None
         self.proc: subprocess.Popen | None = None
 
 
@@ -570,6 +572,11 @@ class VQOrchestrator:
                     # store it for other workers. Fire-and-forget (no reply).
                     self.cache.put(msg.key, msg.codebook)
                     logger.debug("Worker %s stored primary cache entry %s", worker_name, msg.key)
+
+                elif isinstance(msg, ProgressMessage):
+                    ws = self.workers_state.get(worker_name)
+                    if ws:
+                        ws.progress = msg
 
         except (ConnectionError, OSError) as e:
             logger.warning("Worker %s connection failed: %s", worker_name, e)

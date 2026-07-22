@@ -18,7 +18,8 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
-from skcq.clustering import CodebookParams, CodebookResult, build_codebook
+from skcq.clustering import CodebookParams, CodebookResult
+from skcq.experiment import CodebookConfig, CodebookExperiment
 
 logger = logging.getLogger(__name__)
 
@@ -186,17 +187,18 @@ class WorkerActor:
                 n_blocks,
                 cb_params.n_codebooks,
             )
-            results[name] = build_codebook(
-                rows=rows.to(device),
-                params=cb_params,
-                k=k,
-                n_blocks=n_blocks,
-                n_codebooks=cb_params.n_codebooks,
-                num_experts=num_experts,
-                out_dim=out_dim,
-                device=device,
-                name=cb_name,
-            )
+            results[name] = CodebookExperiment(
+                CodebookConfig(
+                    params=cb_params,
+                    k=k,
+                    n_blocks=n_blocks,
+                    n_codebooks=cb_params.n_codebooks,
+                    num_experts=num_experts,
+                    out_dim=out_dim,
+                    device=device,
+                    name=cb_name,
+                )
+            ).fit(rows=rows.to(device))
 
         logger.info("Layer %d: done.", layer)
         return results

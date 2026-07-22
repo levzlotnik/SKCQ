@@ -81,6 +81,7 @@ def _workers(orch: VQOrchestrator) -> list[dict]:
                 "connected": ws.connected,
                 "devices": ws.devices,
                 "current_job": ws.current_job,
+                "progress": ws.progress.__dict__ if ws.progress else None,
                 "last_heartbeat": last_hb,
                 "history": list(ws.heartbeats),
             }
