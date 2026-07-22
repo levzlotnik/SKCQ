@@ -26,6 +26,9 @@ import yaml
 
 from skcq.protocol import (
     AckMessage,
+    CacheRequestMessage,
+    CacheResponseMessage,
+    CacheStoreMessage,
     DisableMessage,
     DoneMessage,
     HeartbeatMessage,
@@ -38,6 +41,7 @@ from skcq.protocol import (
     recv_frame,
     send_frame,
 )
+from skcq.vq.cache import PrimaryCodebookCache
 from skcq.vq.hyperparams import VQConfig, VQHyperparamRange
 
 logger = logging.getLogger("skcq.vq.orchestrator")
@@ -207,6 +211,12 @@ class VQOrchestrator:
         self.workers_state: dict[str, WorkerState] = {}
         self.server_sock: socket.socket | None = None
         self.worker_procs: list[subprocess.Popen] = []
+
+        # Centralized primary codebook cache. Workers proxy get/put over the
+        # wire (RemotePrimaryCodebookCache → CacheRequest/Response/Store
+        # messages) so every worker shares this single on-disk cache instead
+        # of each writing to its own local vq_cache/.
+        self.cache = PrimaryCodebookCache(REPO / "vq_cache")
 
         self._rebuild_queue()
 
@@ -444,6 +454,7 @@ class VQOrchestrator:
     def _handle_worker(self, conn: socket.socket, addr) -> None:
         worker_name = f"{addr[0]}:{addr[1]}"
         current_job: str | None = None
+        ws: WorkerState | None = None
         try:
             while not self.shutdown.is_set():
                 msg: Message | None = recv_frame(conn)
@@ -545,6 +556,20 @@ class VQOrchestrator:
                         ws = self.workers_state.get(worker_name)
                         if ws:
                             ws.current_job = None
+
+                elif isinstance(msg, CacheRequestMessage):
+                    # Worker is asking for a cached primary codebook. Look up
+                    # the central cache (thread-safe) and send it back (or
+                    # None for a miss). The worker will train on miss and
+                    # send CacheStoreMessage so the next worker gets a hit.
+                    cb = self.cache.get(msg.key)
+                    send_frame(conn, CacheResponseMessage(key=msg.key, codebook=cb))
+
+                elif isinstance(msg, CacheStoreMessage):
+                    # Worker finished training a primary on a cache miss —
+                    # store it for other workers. Fire-and-forget (no reply).
+                    self.cache.put(msg.key, msg.codebook)
+                    logger.debug("Worker %s stored primary cache entry %s", worker_name, msg.key)
 
         except (ConnectionError, OSError) as e:
             logger.warning("Worker %s connection failed: %s", worker_name, e)

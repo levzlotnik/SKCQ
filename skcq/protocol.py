@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
+    import torch
+
     from skcq.clustering import CodebookResult
     from skcq.vq_hyperparams import VQConfig
 
@@ -34,6 +36,9 @@ Message = Union[
     "WorkerInfoMessage",
     "HeartbeatMessage",
     "DisableMessage",
+    "CacheRequestMessage",
+    "CacheResponseMessage",
+    "CacheStoreMessage",
 ]
 
 
@@ -187,6 +192,44 @@ class DisableMessage:
     """
 
     pass
+
+
+# ---------------------------------------------------------------------------
+# Primary codebook cache (orchestrator-side cache, wire-proxied by workers)
+# ---------------------------------------------------------------------------
+# Workers send CacheRequestMessage to ask the orchestrator for a cached
+# primary codebook. The orchestrator responds with CacheResponseMessage
+# (codebook tensor on hit, None on miss). After training a new primary,
+# the worker sends CacheStoreMessage (fire-and-forget) so the orchestrator
+# stores it for other workers to reuse.
+
+
+@dataclass
+class CacheRequestMessage:
+    """Worker → Orch: ask for a cached primary codebook by key."""
+
+    key: str
+
+
+@dataclass
+class CacheResponseMessage:
+    """Orch → Worker: here's the codebook (or None = miss)."""
+
+    key: str
+    codebook: torch.Tensor | None  # (bs, K) or (n_blocks, bs, K) for non-shared
+
+
+@dataclass
+class CacheStoreMessage:
+    """Worker → Orch: store this freshly-trained primary for other workers.
+
+    Fire-and-forget — the orchestrator does not reply. Sent after a cache
+    miss + k-means training so the next worker that asks for the same key
+    gets a hit.
+    """
+
+    key: str
+    codebook: torch.Tensor
 
 
 @dataclass

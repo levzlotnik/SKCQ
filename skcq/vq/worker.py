@@ -38,6 +38,7 @@ from pathlib import Path
 import torch
 from huggingface_hub import snapshot_download
 
+from skcq.clustering import DistanceMetric
 from skcq.protocol import (
     DeviceInfo,
     DeviceStats,
@@ -53,7 +54,7 @@ from skcq.protocol import (
     recv_frame,
     send_frame,
 )
-from skcq.vq.cache import PrimaryCodebookCache
+from skcq.vq.cache import RemotePrimaryCodebookCache
 from skcq.vq.runner import integer_schemes, load_model_config, run_one_kmeans
 from worker import build_layer_shard_map, extract_rows, resolve_device
 
@@ -228,7 +229,7 @@ def process_vq_job(
     layer_idx: int,
     device: torch.device,
     chunk_budget_mb: int,
-    cache: PrimaryCodebookCache | None,
+    cache: RemotePrimaryCodebookCache | None,
 ) -> dict:
     """Run one VQ config in-process. Returns the CSV row dict."""
     cfg = job.config
@@ -240,7 +241,7 @@ def process_vq_job(
     residual_block_sizes = [r.block_size for r in cfg.residuals] if cfg.residuals else None
     residual_k = [r.K for r in cfg.residuals] if cfg.residuals else None
     residual_sign_split = [bool(r.sign_split) for r in cfg.residuals] if cfg.residuals else None
-    metric = primary.metric or "cosine"
+    metric: DistanceMetric = primary.metric or "cosine"
     scale_dtype = primary.scale_dtype or "bf16"
     sign_split = bool(primary.sign_split) if primary.sign_split is not None else False
 
@@ -291,19 +292,22 @@ class HeartbeatThread(threading.Thread):
         worker_name: str,
         shutdown_event: threading.Event,
         device_index: int | None = None,
+        sock_lock: threading.Lock | None = None,
     ):
         super().__init__(daemon=True, name="heartbeat")
         self.sock = sock
         self.worker_name = worker_name
         self.shutdown_event = shutdown_event
         self.device_index = device_index
+        self.sock_lock = sock_lock or threading.Lock()
 
     def run(self) -> None:
         while not self.shutdown_event.is_set():
             try:
                 stats = get_device_stats(self.device_index)
                 msg = HeartbeatMessage(worker_name=self.worker_name, devices=stats)
-                send_frame(self.sock, msg)
+                with self.sock_lock:
+                    send_frame(self.sock, msg)
             except ConnectionError, OSError:
                 return
             self.shutdown_event.wait(HEARTBEAT_INTERVAL)
@@ -326,7 +330,7 @@ def main() -> None:
         "--cache-dir",
         type=Path,
         default=Path("vq_cache"),
-        help="Directory for primary codebook cache (set to empty string to disable)",
+        help="Deprecated: cache now lives on the orchestrator. Kept for backwards compat.",
     )
     args = parser.parse_args()
 
@@ -349,9 +353,6 @@ def main() -> None:
         torch.cuda.set_device(device)
     logger.info("VQ worker starting, device=%s, orchestrator=%s:%d", device, host, port)
 
-    # Initialize primary codebook cache
-    cache = PrimaryCodebookCache(args.cache_dir) if args.cache_dir else None
-
     # Connect to orchestrator (retry for up to 30s — server may not be up yet)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     for attempt in range(60):
@@ -365,21 +366,37 @@ def main() -> None:
             time.sleep(0.5)
     logger.info("Connected to orchestrator at %s:%d", host, port)
 
-    # Send WorkerInfoMessage (device inventory, once)
+    # Socket lock: serializes all send_frame calls (main loop + heartbeat
+    # thread + remote cache) so bytes from concurrent frames don't interleave.
+    # recv_frame is only called from the main thread, so it doesn't need the
+    # lock — but sends do, because sendall is not atomic when called from
+    # multiple threads simultaneously.
+    sock_lock = threading.Lock()
+
+    # Primary codebook cache: proxied to the orchestrator over the wire so
+    # every worker shares a single cache (on the orchestrator's disk) instead
+    # of each writing to its own local vq_cache/. The --cache-dir arg is now
+    # a no-op on workers (kept for backwards compat).
+    cache = RemotePrimaryCodebookCache(sock, sock_lock)
+
     # Send WorkerInfoMessage (device inventory, once). Pass the pinned device
     # index (if any) so this worker only reports its assigned GPU — otherwise
     # every worker on a multi-GPU host would echo stats for all visible GPUs
     # and the dashboard couldn't tell leopard-gpu0 from leopard-gpu1.
     device_index = device.index if device.type == "cuda" else None
     devices = get_device_inventory(device_index)
-    send_frame(
-        sock, WorkerInfoMessage(worker_name=args.name, host=socket.gethostname(), devices=devices)
-    )
+    with sock_lock:
+        send_frame(
+            sock,
+            WorkerInfoMessage(worker_name=args.name, host=socket.gethostname(), devices=devices),
+        )
     logger.info("Sent WorkerInfoMessage: %d devices", len(devices))
 
     # Start heartbeat thread
     shutdown_event = threading.Event()
-    heartbeat = HeartbeatThread(sock, args.name, shutdown_event, device_index=device_index)
+    heartbeat = HeartbeatThread(
+        sock, args.name, shutdown_event, device_index=device_index, sock_lock=sock_lock
+    )
     heartbeat.start()
 
     # Weights are loaded lazily on first job — not here. This lets the
@@ -394,7 +411,8 @@ def main() -> None:
 
     try:
         while True:
-            send_frame(sock, ReadyMessage(device=str(device)))
+            with sock_lock:
+                send_frame(sock, ReadyMessage(device=str(device)))
             msg: Message | None = recv_frame(sock)
             if msg is None:
                 logger.error("Orchestrator closed connection")
@@ -477,14 +495,15 @@ def main() -> None:
                     args.chunk_budget_mb,
                     cache,
                 )
-                send_frame(
-                    sock,
-                    VQResultsMessage(
-                        config_id=job.config.id,
-                        row=row,
-                        extra_rows=extra_rows or None,
-                    ),
-                )
+                with sock_lock:
+                    send_frame(
+                        sock,
+                        VQResultsMessage(
+                            config_id=job.config.id,
+                            row=row,
+                            extra_rows=extra_rows or None,
+                        ),
+                    )
                 ack = recv_frame(sock)
                 if isinstance(ack, DoneMessage):
                     logger.info("Orchestrator says done after results — exiting")
@@ -500,7 +519,8 @@ def main() -> None:
                 )
             except (RuntimeError, ValueError, KeyError, OSError) as e:
                 logger.exception("Error processing job %s", job.config.id)
-                send_frame(sock, VQErrorMessage(config_id=job.config.id, msg=str(e)))
+                with sock_lock:
+                    send_frame(sock, VQErrorMessage(config_id=job.config.id, msg=str(e)))
     finally:
         shutdown_event.set()
         sock.close()
