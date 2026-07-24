@@ -482,7 +482,7 @@ class CodebookExperiment(Experiment):
                 raise ValueError(f"residual_block_sizes[{i}]={rbs} must be positive")
         bs_per_codebook = [bs_0] + rbs_list
 
-        raw = rows.float().clone()
+        raw = rows.float().to(device).clone()
         row_norms = raw.norm(dim=-1)
         zero_mask = row_norms < cfg.params.norm_threshold
         logger.info(
