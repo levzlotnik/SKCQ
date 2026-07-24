@@ -23,12 +23,14 @@ Create the leopard venv with `(cd leopard && uv sync)`.
 Remote workers use `./setup_worker.sh` which creates a plain `.venv` with a
 platform-detected torch build.
 
-**Gotcha:** `ruff` and `mypy` live ONLY in the `rocm` project's dev group, so
-bare `uv run ruff`/`uv run mypy` from the repo root fails (`Failed to spawn:
-ruff`) — and `scripts/lint.sh`/`scripts/typecheck.sh` call exactly that. Run them
-from the rocm environment: `uv run --project rocm ruff ...` / activate
-`rocm/.venv`, or after `setup.sh`. `pytest` is NOT affected — it's present in the
-root env transitively, so `uv run pytest` works from root as-is.
+**Gotcha:** `ruff` and `mypy` are dev dependencies that must be run from the
+venv that matches the **host environment** — not a hardcoded project. On a
+CUDA machine, use `cuda/.venv/bin/ruff` / `cuda/.venv/bin/mypy` (or `uv run
+--project cuda ruff ...`). On a ROCm machine, use `rocm/.venv/bin/ruff` /
+`rocm/.venv/bin/mypy` (or `uv run --project rocm ruff ...`). Bare `uv run
+ruff`/`uv run mypy` from the repo root fails because the root env doesn't
+declare them. `pytest` is NOT affected — it's present in the root env
+transitively, so `uv run pytest` works from root as-is.
 
 ## Commands
 
@@ -36,9 +38,9 @@ root env transitively, so `uv run pytest` works from root as-is.
 GPU drivers are instead invoked with an explicit venv python, e.g.
 `rocm/.venv/bin/python build.py`, `cuda/.venv/bin/python eval_quantized.py`).
 
-- Lint: `scripts/lint.sh` — `ruff check` + `ruff format --check` (needs rocm env; see gotcha)
-- Format: `scripts/fmt.sh` — `ruff check --fix` + `ruff format` (needs rocm env)
-- Typecheck: `scripts/typecheck.sh` — `mypy --follow-imports=skip` (needs rocm env)
+- Lint: `scripts/lint.sh` — `ruff check` + `ruff format --check` (needs host-matched env; see gotcha)
+- Format: `scripts/fmt.sh` — `ruff check --fix` + `ruff format` (needs host-matched env)
+- Typecheck: `scripts/typecheck.sh` — `mypy --follow-imports=skip` (needs host-matched env)
 - Tests: `uv run pytest` (works from root; config in root `pyproject.toml`,
   `pythonpath=["."]`). Only `tests/test_codebook.py` — CPU-only, fast, no
   GPU/model download needed.
