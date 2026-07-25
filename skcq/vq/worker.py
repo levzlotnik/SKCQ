@@ -38,7 +38,6 @@ from pathlib import Path
 import torch
 from huggingface_hub import snapshot_download
 
-from skcq.clustering import DistanceMetric
 from skcq.protocol import (
     DeviceInfo,
     DeviceStats,
@@ -243,7 +242,7 @@ def process_vq_job(
     residual_block_sizes = [r.block_size for r in cfg.residuals] if cfg.residuals else None
     residual_k = [r.K for r in cfg.residuals] if cfg.residuals else None
     residual_sign_split = [bool(r.sign_split) for r in cfg.residuals] if cfg.residuals else None
-    metric: DistanceMetric = primary.metric or "cosine"
+    metric = primary.metric or "cosine"
     scale_dtype = primary.scale_dtype or "bf16"
     sign_split = bool(primary.sign_split) if primary.sign_split is not None else False
 
@@ -251,7 +250,7 @@ def process_vq_job(
     if cache is not None:
         cache_key_str = primary.cache_key(layer_idx, cfg.projection)
 
-    from skcq.experiment import (
+    from skcq.codebook.events import (
         CodebookIterEvent,
         KmeansDoneEvent,
         KmeansIterEvent,
@@ -269,7 +268,7 @@ def process_vq_job(
         block_size=primary.block_size,
         K=primary.K,
         n_codebooks=cfg.n_codebooks,
-        metric=metric,
+        metric=metric,  # type: ignore[arg-type]
         residual_k=residual_k,
         residual_sign_split=residual_sign_split,
         shared_codebook=job.shared,

@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING, Union
 if TYPE_CHECKING:
     import torch
 
-    from skcq.clustering import CodebookResult
-    from skcq.vq_hyperparams import VQConfig
+    from skcq.codebook.aqlm import AQLMCodebook
+    from skcq.codebook.cwr import AQLMCWR
+    from skcq.vq.hyperparams import VQConfig
 
 # Union of all message types. recv_frame returns this or None.
 Message = Union[
@@ -67,7 +68,7 @@ class ResultsMessage:
     """Worker → Orch: layer build complete, here are the results."""
 
     layer: int
-    data: dict[str, CodebookResult]
+    data: dict[str, tuple[AQLMCodebook, AQLMCWR]]
 
 
 @dataclass
@@ -280,17 +281,6 @@ class ModelConfig:
     num_experts: int
     hidden_size: int
     moe_intermediate_size: int
-
-
-@dataclass
-class ProjectionSpec:
-    """Spec for one projection within a layer job."""
-
-    name: str
-    rows: object  # torch.Tensor, but can't import at runtime for dataclass default
-    k: int
-    n_blocks: int
-    out_dim: int
 
 
 # --- Framing ---

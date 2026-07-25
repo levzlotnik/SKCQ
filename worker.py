@@ -28,7 +28,9 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
-from skcq.clustering import CodebookParams, CodebookResult, build_codebook
+from skcq.codebook.aqlm import AQLMCodebook
+from skcq.codebook.cwr import AQLMCWR
+from skcq.config import CodebookParams, build_aqlm_codebook
 from skcq.protocol import (
     DoneMessage,
     ErrorMessage,
@@ -140,7 +142,7 @@ def process_job(
     layer_shards_map: LayerShardMap,
     device: torch.device,
     chunk_budget_mb: int,
-) -> dict[str, CodebookResult]:
+) -> dict[str, tuple[AQLMCodebook, AQLMCWR]]:
     """Process one layer job: extract rows, build codebooks for all 3 projections."""
     layer_idx = job.layer
     params = CodebookParams(**job.params)
@@ -154,7 +156,7 @@ def process_job(
         model_dir, layer_idx, layer_shards_map, num_experts, hidden_size, intermediate_size
     )
 
-    results: dict[str, CodebookResult] = {}
+    results: dict[str, tuple[AQLMCodebook, AQLMCWR]] = {}
 
     projections = [
         ("gate", rows_map["gate"], params.k_gate, params.n_blocks_gate_up, intermediate_size),
@@ -166,23 +168,15 @@ def process_job(
         cb_name = f"L{layer_idx}.{name}"
         logger.info(
             "Layer %d: building %s (k=%d, nb=%d, cb=%d)...",
-            layer_idx,
-            name,
-            k,
-            n_blocks,
-            params.n_codebooks,
+            layer_idx, name, k, n_blocks, params.n_codebooks,
         )
-        results[name] = build_codebook(
-            rows=rows.to(device),
-            params=params,
-            k=k,
-            n_blocks=n_blocks,
-            n_codebooks=params.n_codebooks,
-            num_experts=num_experts,
-            out_dim=out_dim,
-            device=device,
-            name=cb_name,
+        aqlm = build_aqlm_codebook(
+            params, k=k, n_blocks=n_blocks, n_codebooks=params.n_codebooks,
+            in_dim=rows.shape[1], out_dim=out_dim, num_experts=num_experts,
+            device=device, name=cb_name,
         )
+        cwr = aqlm.fit(rows.to(device))
+        results[name] = (aqlm, cwr)
 
     logger.info("Layer %d: done.", layer_idx)
     return results

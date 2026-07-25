@@ -1,8 +1,3 @@
-"""Extract weight rows from model and build codebooks.
-
-Delegates clustering to skcq.clustering, adds logging + CodebookParams integration.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -10,10 +5,10 @@ from collections.abc import Mapping
 
 import torch
 
-from skcq.clustering import CodebookResult
-from skcq.config import CodebookParams, LayerOverride
+from skcq.codebook.aqlm import AQLMCodebook
+from skcq.codebook.cwr import AQLMCWR
+from skcq.config import CodebookParams, LayerOverride, build_aqlm_codebook
 from skcq.eval_model import get_text_model
-from skcq.experiment import CodebookConfig, CodebookExperiment
 from skcq.rocm_client import RocmClient
 
 logger = logging.getLogger(__name__)
@@ -26,7 +21,7 @@ def extract_and_build_codebooks(
     device: torch.device | None = None,
     progress: bool = True,
     cuda_worker: RocmClient | None = None,
-) -> list[dict[str, CodebookResult]]:
+) -> list[dict[str, tuple[AQLMCodebook, AQLMCWR]]]:
     if params is None:
         params = CodebookParams()
 
@@ -38,7 +33,7 @@ def extract_and_build_codebooks(
     hidden_size: int = config.hidden_size
     num_experts: int = config.num_experts
 
-    results: list[dict[str, CodebookResult]] = []
+    results: list[dict[str, tuple[AQLMCodebook, AQLMCWR]]] = []
 
     text_model = get_text_model(model)
     layers = text_model.layers
@@ -73,25 +68,14 @@ def extract_and_build_codebooks(
                 layer_params.n_blocks_gate_up,
                 intermediate_size,
             ),
-            (
-                "up",
-                up_rows,
-                layer_params.k_up,
-                layer_params.n_blocks_gate_up,
-                intermediate_size,
-            ),
-            (
-                "down",
-                down_rows,
-                layer_params.k_down,
-                layer_params.n_blocks_down,
-                hidden_size,
-            ),
+            ("up", up_rows, layer_params.k_up, layer_params.n_blocks_gate_up, intermediate_size),
+            ("down", down_rows, layer_params.k_down, layer_params.n_blocks_down, hidden_size),
         ]
 
-        layer_result: dict[str, CodebookResult] = {}
+        layer_result: dict[str, tuple[AQLMCodebook, AQLMCWR]] = {}
         for name, rows, k, n_blocks, out_dim in projections:
             cb_name = f"L{layer_idx}.{name}"
+            in_dim = rows.shape[1]
             if cuda_worker is not None:
                 layer_result[name] = cuda_worker.build_codebook(
                     rows,
@@ -104,18 +88,18 @@ def extract_and_build_codebooks(
                     name=cb_name,
                 )
             else:
-                layer_result[name] = CodebookExperiment(
-                    CodebookConfig(
-                        params=layer_params,
-                        k=k,
-                        n_blocks=n_blocks,
-                        n_codebooks=layer_params.n_codebooks,
-                        num_experts=num_experts,
-                        out_dim=out_dim,
-                        device=device,
-                        name=cb_name,
-                    )
-                ).fit(rows)
+                aqlm = build_aqlm_codebook(
+                    layer_params,
+                    k=k,
+                    n_blocks=n_blocks,
+                    n_codebooks=layer_params.n_codebooks,
+                    in_dim=in_dim,
+                    out_dim=out_dim,
+                    device=device,
+                    name=cb_name,
+                )
+                cwr = aqlm.fit(rows)
+                layer_result[name] = (aqlm, cwr)
 
         results.append(layer_result)
 

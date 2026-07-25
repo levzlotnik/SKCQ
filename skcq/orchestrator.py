@@ -23,7 +23,8 @@ from pathlib import Path
 import torch
 import yaml
 
-from skcq.clustering import CodebookResult
+from skcq.codebook.aqlm import AQLMCodebook
+from skcq.codebook.cwr import AQLMCWR
 from skcq.codebook_experts import CodebookModule
 from skcq.config import CodebookParams, ExperimentConfig
 from skcq.protocol import (
@@ -43,7 +44,7 @@ from skcq.protocol import (
 
 logger = logging.getLogger("skcq.orchestrator")
 
-LayerResults = dict[str, CodebookResult]
+LayerResults = dict[str, tuple[AQLMCodebook, AQLMCWR]]
 
 
 def _load_workers_config(path: Path) -> WorkersConfig:
@@ -108,7 +109,8 @@ def _save_layer_results(
 
     for name, result in results.items():
         out_dim = intermediate_size if name in ("gate", "up") else hidden_size
-        module = CodebookModule.from_result(result, out_dim=out_dim)
+        aqlm, cwr = result
+        module = CodebookModule.from_cwr(aqlm, cwr, out_dim=out_dim)
         torch.save(module.state_dict_with_meta(), layer_dir / f"{name}.pt")
 
     logger.info("Saved layer %d results to %s", layer_idx, layer_dir)

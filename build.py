@@ -8,6 +8,8 @@ from typing import Any
 
 import torch
 
+from skcq.codebook.aqlm import AQLMCodebook
+from skcq.codebook.cwr import AQLMCWR
 from skcq.codebook_experts import CodebookExperts, CodebookModule
 from skcq.config import ExperimentConfig
 from skcq.eval_model import compute_perplexity, get_calibration_text, get_text_model, load_model
@@ -18,7 +20,7 @@ from skcq.metrics import (
     install_routing_capture,
     remove_hooks,
 )
-from skcq.quantize import CodebookResult, extract_and_build_codebooks
+from skcq.quantize import extract_and_build_codebooks
 from skcq.rocm_client import RocmClient
 from skcq.tasks import run_tasks
 
@@ -26,18 +28,17 @@ logger = logging.getLogger("skcq")
 
 
 def modules_from_results(
-    codebook_results: list[dict[str, CodebookResult]],
+    codebook_results: list[dict[str, tuple[AQLMCodebook, AQLMCWR]]],
 ) -> list[dict[str, CodebookModule]]:
-    """Convert CodebookResults into CodebookModules (one per projection per layer)."""
+    """Convert (AQLMCodebook, AQLMCWR) pairs into CodebookModules."""
     modules: list[dict[str, CodebookModule]] = []
     for layer_result in codebook_results:
         layer_modules: dict[str, CodebookModule] = {}
         for name in ["gate", "up", "down"]:
-            result = layer_result[name]
-            n_rows = result.scales.shape[0]
-            assert result.num_experts is not None
-            out_dim = n_rows // result.num_experts
-            layer_modules[name] = CodebookModule.from_result(result, out_dim=out_dim)
+            aqlm, cwr = layer_result[name]
+            assert aqlm.config is not None
+            assert aqlm.config.out_dim is not None
+            layer_modules[name] = CodebookModule.from_cwr(aqlm, cwr, out_dim=aqlm.config.out_dim)
         modules.append(layer_modules)
     return modules
 
@@ -71,26 +72,21 @@ def replace_experts(
             logger.info("Replacing experts: %d/%d layers", layer_idx + 1, num_layers)
 
 
-def save_codebooks(codebook_results: list[dict[str, CodebookResult]], output_dir: Path) -> None:
-    """Save codebook results to disk as CodebookModule state_dicts + meta.
-
-    Shapes (n_blocks, block_size, out_dim, num_experts, per-codebook K) are all
-    inferred from the CodebookResult tensors, so no external dims are required.
-    """
+def save_codebooks(
+    codebook_results: list[dict[str, tuple[AQLMCodebook, AQLMCWR]]], output_dir: Path
+) -> None:
+    """Save codebook results to disk as CodebookModule state_dicts + meta."""
     output_dir.mkdir(parents=True, exist_ok=True)
     num_layers = len(codebook_results)
     for layer_idx, layer_result in enumerate(codebook_results):
         layer_dir = output_dir / f"layer_{layer_idx}"
         layer_dir.mkdir(exist_ok=True)
         for name in ["gate", "up", "down"]:
-            result = layer_result[name]
-            n_rows = result.scales.shape[0]
-            assert result.num_experts is not None
-            out_dim = n_rows // result.num_experts
-            module = CodebookModule.from_result(result, out_dim=out_dim)
-            payload = module.state_dict_with_meta()
-            payload["zero_mask"] = result.zero_mask
-            torch.save(payload, layer_dir / f"{name}.pt")
+            aqlm, cwr = layer_result[name]
+            assert aqlm.config is not None
+            assert aqlm.config.out_dim is not None
+            module = CodebookModule.from_cwr(aqlm, cwr, out_dim=aqlm.config.out_dim)
+            torch.save(module.state_dict_with_meta(), layer_dir / f"{name}.pt")
         if (layer_idx + 1) % 5 == 0 or layer_idx + 1 == num_layers:
             logger.info("Saving codebooks: %d/%d layers", layer_idx + 1, num_layers)
 

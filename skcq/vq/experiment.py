@@ -1,13 +1,3 @@
-"""VQ run experiment + wire listener (replaces run_one_kmeans).
-
-``VQRunExperiment`` wraps one VQ config run: constructs a ``CodebookExperiment``,
-forwards its events, quantizes scales, computes error + bpw, and emits
-``VQStartEvent`` / ``VQDoneEvent``.
-
-``WireListener`` subscribes to ``CodebookIterEvent`` and sends ``ProgressMessage``
-over the TCP wire to the orchestrator (no throttling — every iteration).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -17,24 +7,30 @@ from dataclasses import dataclass
 
 import torch
 
-from skcq.clustering import CodebookParams, DistanceMetric
-from skcq.experiment import (
+from skcq.codebook.aqlm import AQLMCodebook, AQLMCodebookConfig
+from skcq.codebook.base import DistanceMetric
+from skcq.codebook.cwr import SSVQCWR, CompressedWeightsRepresentation, SphericalCWR
+from skcq.codebook.euclidean import EuclideanCodebook, EuclideanCodebookConfig
+from skcq.codebook.events import (
     CodebookDoneEvent,
-    CodebookExperiment,
     CodebookIterEvent,
     CodebookStartEvent,
     Experiment,
+    KmeansDoneEvent,
+    KmeansIterEvent,
+    KmeansStartEvent,
 )
+from skcq.codebook.spherical import (
+    SphericalCodebook,
+    SphericalCodebookConfig,
+    quantize_spherical_scales,
+    scale_bits_per_elem,
+)
+from skcq.codebook.ssvq import SSVQCodebook
 from skcq.protocol import ProgressMessage, send_frame
 from skcq.vq.bpw import bits_per_weight_kmeans
-from skcq.vq.runner import quantize_scales, scale_bits_per_elem
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# VQ run events
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -53,15 +49,8 @@ class VQDoneEvent:
     row: dict
 
 
-# ---------------------------------------------------------------------------
-# VQRunConfig
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class VQRunConfig:
-    """Configuration for one VQ config run (replaces run_one_kmeans params)."""
-
     projection: str
     in_dim: int
     num_experts: int
@@ -86,18 +75,16 @@ class VQRunConfig:
     cache_key_str: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# VQRunExperiment
-# ---------------------------------------------------------------------------
+def _resolve_list(val, n, default):
+    if val is None:
+        return [default] * n
+    if isinstance(val, (int, bool)):
+        return [val] * n
+    return list(val[:n]) + [default] * (n - len(val))
 
 
 class VQRunExperiment(Experiment):
-    """One VQ config run (replaces ``run_one_kmeans``).
-
-    Composes ``CodebookExperiment`` internally, forwarding all its events.
-    Emits ``VQStartEvent`` at the start and ``VQDoneEvent`` with the results
-    row dict at the end.
-    """
+    """One VQ config run. Composes AQLMCodebook internally."""
 
     def __init__(self, config: VQRunConfig) -> None:
         super().__init__()
@@ -105,7 +92,6 @@ class VQRunExperiment(Experiment):
         self._result: dict | None = None
 
     def fit(self, W_raw: torch.Tensor) -> dict:  # noqa: N803
-        """Run one VQ config. Returns the results row dict."""
         cfg = self.config
         device = cfg.device
         n_rows = W_raw.shape[0]
@@ -113,21 +99,18 @@ class VQRunExperiment(Experiment):
         n_blocks = cfg.in_dim // cfg.block_size
         remainder_dim = cfg.in_dim - n_blocks * cfg.block_size
 
-        # K per codebook
-        if cfg.residual_k is None:
+        k_per_codebook = _resolve_list(cfg.residual_k, cfg.n_codebooks, cfg.K)
+        if isinstance(cfg.residual_k, int | None):
+            k_per_codebook = [
+                cfg.K if c == 0 else (cfg.residual_k or cfg.K) for c in range(cfg.n_codebooks)
+            ]
+        elif cfg.residual_k is None:
             k_per_codebook = [cfg.K] * cfg.n_codebooks
-        elif isinstance(cfg.residual_k, int):
-            k_per_codebook = [cfg.K if c == 0 else cfg.residual_k for c in range(cfg.n_codebooks)]
         else:
-            if len(cfg.residual_k) < cfg.n_codebooks - 1:
-                raise ValueError(
-                    f"residual_k list has {len(cfg.residual_k)} values, need {cfg.n_codebooks - 1}"
-                )
             k_per_codebook = [
                 cfg.K if c == 0 else cfg.residual_k[c - 1] for c in range(cfg.n_codebooks)
             ]
 
-        # Block size per codebook
         if cfg.residual_block_sizes is None:
             bs_per_codebook = [cfg.block_size] * cfg.n_codebooks
         elif isinstance(cfg.residual_block_sizes, int):
@@ -136,31 +119,20 @@ class VQRunExperiment(Experiment):
                 for c in range(cfg.n_codebooks)
             ]
         else:
-            if len(cfg.residual_block_sizes) < cfg.n_codebooks - 1:
-                raise ValueError(
-                    f"residual_block_sizes has {len(cfg.residual_block_sizes)} values, "
-                    f"need {cfg.n_codebooks - 1}"
-                )
             bs_per_codebook = [
                 cfg.block_size if c == 0 else cfg.residual_block_sizes[c - 1]
                 for c in range(cfg.n_codebooks)
             ]
 
-        # Sign-split per codebook
         if cfg.residual_sign_split is None:
             res_ss = [False] * (cfg.n_codebooks - 1)
         elif isinstance(cfg.residual_sign_split, bool):
             res_ss = [cfg.residual_sign_split] * (cfg.n_codebooks - 1)
         else:
-            if len(cfg.residual_sign_split) < cfg.n_codebooks - 1:
-                raise ValueError(
-                    f"residual_sign_split has {len(cfg.residual_sign_split)} values, "
-                    f"need {cfg.n_codebooks - 1}"
-                )
             res_ss = list(cfg.residual_sign_split[: cfg.n_codebooks - 1])
+            res_ss += [False] * (cfg.n_codebooks - 1 - len(res_ss))
         sign_split_list = [cfg.sign_split, *res_ss]
 
-        # Build label for the result row
         shared_tag = "shared" if cfg.shared_codebook else "perblock"
         ssvq_tag = "ssvq" if cfg.sign_split else "nosign"
         cb_parts = [
@@ -172,8 +144,7 @@ class VQRunExperiment(Experiment):
         label = f"kmeans_{cb_id}_{cfg.metric[:3]}_{shared_tag}_{ssvq_tag}{scale_tag}{cb_qtag}"
 
         logger.info(
-            "[%s] %s (n_blocks=%d, remainder=%d, K=%d, K_r=%s,"
-            " bs_r=%s, cb=%d, metric=%s, shared=%s)",
+            "[%s] %s (n_blocks=%d, rem=%d, K=%d, K_r=%s, bs_r=%s, cb=%d, metric=%s, shared=%s)",
             cfg.projection,
             label,
             n_blocks,
@@ -187,23 +158,8 @@ class VQRunExperiment(Experiment):
         )
 
         out_dim = cfg.intermediate_size if cfg.projection != "down" else cfg.hidden_size
-
-        params = CodebookParams(
-            k_gate=cfg.K,
-            k_up=cfg.K,
-            k_down=cfg.K,
-            n_blocks_gate_up=n_blocks,
-            n_blocks_down=n_blocks,
-            n_codebooks=cfg.n_codebooks,
-            residual_k=cfg.residual_k,
-            residual_block_sizes=cfg.residual_block_sizes,
-            max_iters=cfg.max_iters,
-            norm_threshold=0.001,
-            skip_zeros=True,
-            chunk_budget_mb=cfg.chunk_budget_mb,
-        )
-
         config_id = f"L{cfg.layer_idx}.{cfg.projection}.{label}"
+
         self._emit(
             VQStartEvent(
                 config_id=config_id,
@@ -215,44 +171,99 @@ class VQRunExperiment(Experiment):
             )
         )
 
-        # Build the codebook via CodebookExperiment
-        from skcq.experiment import CodebookConfig
+        # Build primary codebook
+        from skcq.codebook.base import WeightsCodebookBase
 
-        cb_config = CodebookConfig(
-            params=params,
-            k=cfg.K,
-            n_blocks=n_blocks,
-            n_codebooks=cfg.n_codebooks,
-            num_experts=cfg.num_experts,
-            out_dim=out_dim,
-            device=device,
-            name=f"L{cfg.layer_idx}.{cfg.projection}.{label}",
-            metric=cfg.metric,
-            shared_codebook=cfg.shared_codebook,
-            sign_split=sign_split_list,
-            residual_block_sizes=cfg.residual_block_sizes,
-            codebook_bits=cfg.codebook_bits,
-            primary_codebook_cache=cfg.primary_codebook_cache,
-            cache_key_str=cfg.cache_key_str,
-            primary_block_size=cfg.block_size,
+        if cfg.metric == "cosine":
+            primary: WeightsCodebookBase = SphericalCodebook(
+                SphericalCodebookConfig(
+                    block_size=cfg.block_size,
+                    K=cfg.K,
+                    shared=cfg.shared_codebook,
+                    max_iters=cfg.max_iters,
+                    norm_threshold=0.001,
+                    skip_zeros=True,
+                    chunk_budget_mb=cfg.chunk_budget_mb,
+                    device=device,
+                    max_train_samples=2**23 if cfg.shared_codebook else 0,
+                )
+            )
+            if cfg.sign_split:
+                primary = SSVQCodebook(primary)
+        else:
+            primary = EuclideanCodebook(
+                EuclideanCodebookConfig(
+                    block_size=cfg.block_size,
+                    K=cfg.K,
+                    shared=cfg.shared_codebook,
+                    max_iters=cfg.max_iters,
+                    norm_threshold=0.001,
+                    skip_zeros=True,
+                    chunk_budget_mb=cfg.chunk_budget_mb,
+                    device=device,
+                    max_train_samples=2**23 if cfg.shared_codebook else 0,
+                )
+            )
+
+        # Build residual codebooks
+        residuals: list[WeightsCodebookBase] = []
+        for c in range(1, cfg.n_codebooks):
+            euc: WeightsCodebookBase = EuclideanCodebook(
+                EuclideanCodebookConfig(
+                    block_size=bs_per_codebook[c],
+                    K=k_per_codebook[c],
+                    shared=cfg.shared_codebook,
+                    max_iters=cfg.max_iters,
+                    norm_threshold=0.001,
+                    skip_zeros=False,
+                    chunk_budget_mb=cfg.chunk_budget_mb,
+                    device=device,
+                )
+            )
+            if sign_split_list[c]:
+                euc = SSVQCodebook(euc)
+            residuals.append(euc)
+
+        aqlm = AQLMCodebook(
+            primary=primary,
+            residuals=residuals,
+            config=AQLMCodebookConfig(
+                codebook_bits=cfg.codebook_bits,
+                norm_threshold=0.001,
+                device=device,
+                out_dim=out_dim,
+                num_experts=cfg.num_experts,
+            ),
         )
-        cb_exp = CodebookExperiment(cb_config)
 
-        # Forward all codebook events to self's listeners
-        self._forward_from(cb_exp, CodebookStartEvent)
-        self._forward_from(cb_exp, CodebookIterEvent)
-        self._forward_from(cb_exp, CodebookDoneEvent)
+        self._forward_from(aqlm, CodebookStartEvent)
+        self._forward_from(aqlm, CodebookIterEvent)
+        self._forward_from(aqlm, CodebookDoneEvent)
+        self._forward_from(aqlm, KmeansStartEvent)
+        self._forward_from(aqlm, KmeansIterEvent)
+        self._forward_from(aqlm, KmeansDoneEvent)
 
-        result = cb_exp.fit(W_raw.to(device))
+        cwr = aqlm.fit(W_raw.to(device))
 
-        # Quantize scales
+        # Quantize scales post-hoc
         sc_bits = scale_bits_per_elem(cfg.scale_dtype)
-        result.scales = quantize_scales(result.scales, cfg.scale_dtype)
-        logger.info(
-            "  [%s] scale quantized to %s (%d bits/elem)", cfg.projection, cfg.scale_dtype, sc_bits
-        )
+        if cfg.metric == "cosine":
+            cb = aqlm.primary
+            cwr_p: CompressedWeightsRepresentation = cwr.primary
+            if isinstance(cb, SSVQCodebook):
+                cb = cb.inner
+                assert isinstance(cwr_p, SSVQCWR)
+                cwr_p = cwr_p.inner
+            if isinstance(cb, SphericalCodebook) and isinstance(cwr_p, SphericalCWR):
+                quantize_spherical_scales(cwr_p, cb, cfg.scale_dtype)
+                logger.info(
+                    "  [%s] scale quantized to %s (%d bits/elem)",
+                    cfg.projection,
+                    cfg.scale_dtype,
+                    sc_bits,
+                )
 
-        w_recon = result.reconstruct()
+        w_recon = aqlm.reconstruct(cwr)
         err = torch.norm(W_raw.float() - w_recon).item() / w_norm
 
         bpw = bits_per_weight_kmeans(
@@ -274,7 +285,7 @@ class VQRunExperiment(Experiment):
 
         logger.info("  [%s] err=%.6f bpw=%.3f cr=%.2f", cfg.projection, err, bpw, comp_ratio)
 
-        del result, w_recon
+        del cwr, w_recon
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -308,18 +319,7 @@ class VQRunExperiment(Experiment):
         return self._result
 
 
-# ---------------------------------------------------------------------------
-# WireListener — sends ProgressMessage over TCP on every CodebookIterEvent
-# ---------------------------------------------------------------------------
-
-
 class WireListener:
-    """Subscribe to ``CodebookIterEvent`` and send ``ProgressMessage`` over the wire.
-
-    No throttling — sends every iteration. Uses ``sock_lock`` to serialize
-    ``send_frame`` calls with the heartbeat thread that shares the same socket.
-    """
-
     def __init__(self, sock: socket.socket, lock: threading.Lock, worker_name: str) -> None:
         self._sock = sock
         self._lock = lock

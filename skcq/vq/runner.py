@@ -1,16 +1,12 @@
 """VQ config runner: the core logic for evaluating one VQ hyperparameter config.
 
-Moved out of experiments/weight_quant_error.py so both the worker and the
-experiment script can import it as a first-class package member (no sys.path
-hacks).
-
 Contains:
   - load_model_config / extract_layer_rows: model weight loading
   - Integer baseline quantization (int2/3/4/8, fp8)
-  - Scale dtype quantization (int<N>, fp16, bf16, fp8)
-  - quantize_scales, scale_bits_per_elem: scale quantization utilities
   - integer_schemes: int/fp8 baseline quantization functions
-  - run_one_kmeans: the main VQ config runner
+
+Scale quantization utilities (parse_scale_dtype, scale_bits_per_elem,
+quantize_spherical_scales) live in skcq.codebook.spherical.
 """
 
 # ruff: noqa: N806, N803, N802, E501  (W_raw / quant_intN match existing convention)
@@ -192,68 +188,4 @@ def integer_schemes(
     return schemes
 
 
-# ---------------------------------------------------------------------------
-# Scale dtype parsing and quantization
-# ---------------------------------------------------------------------------
-
-_FP8_MAP = {
-    "fp8_e4m3": torch.float8_e4m3fn,
-    "fp8_e5m2": torch.float8_e5m2,
-}
-
-
-def parse_scale_dtype(s: str) -> str:
-    """Validate and normalise a scale-dtype string."""
-    s = s.strip().lower()
-    if s.startswith("int"):
-        bits = int(s[3:])
-        if bits < 2 or bits > 16:
-            raise ValueError(f"int bits must be 2-16, got {bits}")
-        return s
-    if s in ("fp16", "bf16"):
-        return s
-    if s in _FP8_MAP:
-        return s
-    raise ValueError(
-        f"Unknown scale dtype '{s}'. Expected: int<Nbits>, fp16, bf16, fp8_e4m3, fp8_e5m2"
-    )
-
-
-def scale_bits_per_elem(dtype: str) -> int:
-    """Bits per scale element for the given dtype."""
-    if dtype.startswith("int"):
-        return int(dtype[3:])
-    if dtype in _FP8_MAP:
-        return 8
-    if dtype in ("fp16", "bf16"):
-        return 16
-    raise ValueError(f"Unknown scale dtype: {dtype}")
-
-
-def quantize_scales(scales: torch.Tensor, dtype: str) -> torch.Tensor:
-    """Quantize-and-dequantize scales to the target dtype, returning float32.
-
-    For integer dtypes: per-tensor symmetric quantization. The single global
-    fp32 scale factor is negligible (one float per (n_rows, n_blocks) tensor).
-    """
-    if dtype == "bf16":
-        return scales.to(torch.bfloat16).to(torch.float32)
-    if dtype == "fp16":
-        return scales.to(torch.float16).to(torch.float32)
-    if dtype in _FP8_MAP:
-        return scales.to(_FP8_MAP[dtype]).to(torch.float32)
-    if dtype.startswith("int"):
-        bits = int(dtype[3:])
-        levels = 2 ** (bits - 1) - 1  # symmetric: -levels..+levels
-        abs_max = scales.abs().max()
-        if abs_max == 0:
-            return scales.clone()
-        q_scale = abs_max / levels
-        q = torch.round(scales / q_scale).clamp(-levels, levels)
-        return (q * q_scale).to(torch.float32)
-    raise ValueError(f"Unknown scale dtype: {dtype}")
-
-
-# ---------------------------------------------------------------------------
-# BPW accounting
-# ---------------------------------------------------------------------------
+# Scale dtype parsing and quantization now live in skcq.codebook.spherical.

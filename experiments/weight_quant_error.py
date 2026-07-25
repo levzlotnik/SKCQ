@@ -19,12 +19,9 @@ from pathlib import Path
 import torch
 
 # skcq is importable when running from repo root (pythonpath=["."] in pyproject.toml)
-from skcq.vq.runner import (
-    integer_schemes,
-    load_model_config,
-    parse_scale_dtype,
-)
-from skcq.experiment import KmeansDoneEvent, KmeansIterEvent, KmeansStartEvent, TqdmListener
+from skcq.codebook.events import KmeansDoneEvent, KmeansIterEvent, KmeansStartEvent, TqdmListener
+from skcq.codebook.spherical import parse_scale_dtype
+from skcq.vq.runner import integer_schemes, load_model_config
 from skcq.vq.experiment import VQRunConfig, VQRunExperiment
 
 logging.basicConfig(

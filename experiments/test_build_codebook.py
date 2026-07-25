@@ -10,8 +10,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from skcq.clustering import CodebookParams
-from skcq.experiment import CodebookConfig, CodebookExperiment
+from skcq.config import CodebookParams, build_aqlm_codebook
 
 # Load real data
 MODEL_ID = "Qwen/Qwen3.6-35B-A3B"

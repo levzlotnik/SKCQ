@@ -18,8 +18,9 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
-from skcq.clustering import CodebookParams, CodebookResult
-from skcq.experiment import CodebookConfig, CodebookExperiment
+from skcq.codebook.aqlm import AQLMCodebook
+from skcq.codebook.cwr import AQLMCWR
+from skcq.config import CodebookParams, build_aqlm_codebook
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class WorkerActor:
         num_experts: int,
         hidden_size: int,
         intermediate_size: int,
-    ) -> dict[str, CodebookResult]:
+    ) -> dict[str, tuple[AQLMCodebook, AQLMCWR]]:
         """Build codebooks for one layer's gate, up, and down projections.
 
         Args:
@@ -151,7 +152,7 @@ class WorkerActor:
         cb_params = CodebookParams(**params)
         cb_params.chunk_budget_mb = self.chunk_budget_mb
 
-        results: dict[str, CodebookResult] = {}
+        results: dict[str, tuple[AQLMCodebook, AQLMCWR]] = {}
 
         projections = [
             (
@@ -187,18 +188,19 @@ class WorkerActor:
                 n_blocks,
                 cb_params.n_codebooks,
             )
-            results[name] = CodebookExperiment(
-                CodebookConfig(
-                    params=cb_params,
-                    k=k,
-                    n_blocks=n_blocks,
-                    n_codebooks=cb_params.n_codebooks,
-                    num_experts=num_experts,
-                    out_dim=out_dim,
-                    device=device,
-                    name=cb_name,
-                )
-            ).fit(rows=rows.to(device))
+            aqlm = build_aqlm_codebook(
+                cb_params,
+                k=k,
+                n_blocks=n_blocks,
+                n_codebooks=cb_params.n_codebooks,
+                in_dim=rows.shape[1],
+                out_dim=out_dim,
+                num_experts=num_experts,
+                device=device,
+                name=cb_name,
+            )
+            cwr = aqlm.fit(rows.to(device))
+            results[name] = (aqlm, cwr)
 
         logger.info("Layer %d: done.", layer)
         return results
