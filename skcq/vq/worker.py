@@ -28,16 +28,19 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import socket
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
 
+from skcq.errors import InfrastructureError
 from skcq.protocol import (
     DeviceInfo,
     DeviceStats,
@@ -64,66 +67,63 @@ HEARTBEAT_INTERVAL = 5.0
 
 
 # ---------------------------------------------------------------------------
-# GPU monitoring (nvidia-smi / rocm-smi subprocess)
+# GPU monitoring (nvidia-smi / amd-smi subprocess)
 # ---------------------------------------------------------------------------
 
 
 def _query_gpu_stats_nvidia() -> list[tuple[int, int, int, float]]:
     """Query nvidia-smi for per-GPU stats. Returns [(index, used_mb, total_mb, util_pct)]."""
-    try:
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,memory.used,memory.total,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            text=True,
-            timeout=5,
-        )
-        results = []
-        for line in out.strip().split("\n"):
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 4:
-                idx = int(parts[0])
-                used_mb = int(parts[1])
-                total_mb = int(parts[2])
-                util = float(parts[3])
-                results.append((idx, used_mb, total_mb, util))
-        return results
-    except FileNotFoundError, subprocess.SubprocessError, ValueError:
-        return []
+    out = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,memory.used,memory.total,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+        timeout=5,
+    )
+    results = []
+    for line in out.strip().split("\n"):
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 4:
+            idx = int(parts[0])
+            used_mb = int(parts[1])
+            total_mb = int(parts[2])
+            util = float(parts[3])
+            results.append((idx, used_mb, total_mb, util))
+    return results
 
 
 def _query_gpu_stats_rocm() -> list[tuple[int, int, int, float]]:
     """Query amd-smi for per-GPU stats. Returns [(index, used_mb, total_mb, util_pct)]."""
-    try:
-        out = subprocess.check_output(
-            ["amd-smi", "metric", "-m", "-u", "--json"],
-            text=True,
-            timeout=5,
-        )
-
-        data = json.loads(out)
-        results = []
-        for gpu in data.get("gpu_data", []):
-            idx = gpu["gpu"]
-            mem = gpu.get("mem_usage", {})
-            used = mem.get("used_vram", {}).get("value", 0)
-            total = mem.get("total_vram", {}).get("value", 0)
-            util = gpu.get("usage", {})
-            util_pct = util.get("gfx_activity", {}).get("value", 0) if isinstance(util, dict) else 0
-            results.append((idx, used, total, float(util_pct)))
-        return results
-    except FileNotFoundError, subprocess.SubprocessError, ValueError, ImportError:
-        return []
+    out = subprocess.check_output(
+        ["amd-smi", "metric", "-m", "-u", "--json"],
+        text=True,
+        timeout=5,
+    )
+    data = json.loads(out)
+    results = []
+    for gpu in data.get("gpu_data", []):
+        idx = gpu["gpu"]
+        mem = gpu.get("mem_usage", {})
+        used = mem.get("used_vram", {}).get("value", 0)
+        total = mem.get("total_vram", {}).get("value", 0)
+        util = gpu.get("usage", {})
+        util_pct = util.get("gfx_activity", {}).get("value", 0) if isinstance(util, dict) else 0
+        results.append((idx, used, total, float(util_pct)))
+    return results
 
 
-def _query_gpu_stats() -> list[tuple[int, int, int, float]]:
-    """Query GPU stats via subprocess. Tries nvidia-smi first, then rocm-smi."""
-    stats = _query_gpu_stats_nvidia()
-    if stats:
-        return stats
-    return _query_gpu_stats_rocm()
+def _select_gpu_stats_fn() -> Callable[[], list[tuple[int, int, int, float]]]:
+    """Pick the right stats queryer for this platform. Called once at startup.
+
+    Raises InfrastructureError if neither nvidia-smi nor amd-smi is in PATH.
+    """
+    if shutil.which("nvidia-smi") is not None:
+        return _query_gpu_stats_nvidia
+    if shutil.which("amd-smi") is not None:
+        return _query_gpu_stats_rocm
+    raise InfrastructureError("neither nvidia-smi nor amd-smi found in PATH")
 
 
 def get_device_inventory(device_index: int | None = None) -> list[DeviceInfo]:
@@ -150,7 +150,10 @@ def get_device_inventory(device_index: int | None = None) -> list[DeviceInfo]:
     return devices
 
 
-def get_device_stats(device_index: int | None = None) -> list[DeviceStats]:
+def get_device_stats(
+    stats_fn: Callable[[], list[tuple[int, int, int, float]]],
+    device_index: int | None = None,
+) -> list[DeviceStats]:
     """Get live device stats (called every HEARTBEAT_INTERVAL).
 
     See ``get_device_inventory`` for the ``device_index`` semantics. The smi
@@ -158,7 +161,7 @@ def get_device_stats(device_index: int | None = None) -> list[DeviceStats]:
     directly by the (physical) ``device_index``.
     """
     indices = range(torch.cuda.device_count()) if device_index is None else [device_index]
-    gpu_stats = _query_gpu_stats()  # GPU-wide (from smi subprocess)
+    gpu_stats = stats_fn()  # GPU-wide (from smi subprocess)
     stats = []
     for i in indices:
         alloc_mb = int(torch.cuda.memory_allocated(i) / (1024 * 1024))
@@ -311,6 +314,7 @@ class HeartbeatThread(threading.Thread):
         sock: socket.socket,
         worker_name: str,
         shutdown_event: threading.Event,
+        stats_fn: Callable[[], list[tuple[int, int, int, float]]],
         device_index: int | None = None,
         sock_lock: threading.Lock | None = None,
     ):
@@ -318,17 +322,21 @@ class HeartbeatThread(threading.Thread):
         self.sock = sock
         self.worker_name = worker_name
         self.shutdown_event = shutdown_event
+        self.stats_fn = stats_fn
         self.device_index = device_index
         self.sock_lock = sock_lock or threading.Lock()
 
     def run(self) -> None:
         while not self.shutdown_event.is_set():
             try:
-                stats = get_device_stats(self.device_index)
-                msg = HeartbeatMessage(worker_name=self.worker_name, devices=stats)
-                with self.sock_lock:
-                    send_frame(self.sock, msg)
-            except ConnectionError, OSError:
+                try:
+                    stats = get_device_stats(self.stats_fn, self.device_index)
+                    msg = HeartbeatMessage(worker_name=self.worker_name, devices=stats)
+                    with self.sock_lock:
+                        send_frame(self.sock, msg)
+                except (ConnectionError, OSError) as ex:
+                    raise InfrastructureError("heartbeat socket failure") from ex
+            except InfrastructureError:
                 return
             self.shutdown_event.wait(HEARTBEAT_INTERVAL)
 
@@ -373,15 +381,20 @@ def main() -> None:
         torch.cuda.set_device(device)
     logger.info("VQ worker starting, device=%s, orchestrator=%s:%d", device, host, port)
 
+    # Pre-flight: select GPU stats queryer (crashes early if neither smi tool is available)
+    stats_fn = _select_gpu_stats_fn()
+
     # Connect to orchestrator (retry for up to 30s — server may not be up yet)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     for attempt in range(60):
         try:
             sock.connect((host, port))
             break
-        except ConnectionError, OSError:
+        except (ConnectionError, OSError) as ex:
             if attempt == 59:
-                raise
+                raise InfrastructureError(
+                    f"orchestrator at {host}:{port} unreachable after 60 retries"
+                ) from ex
             logger.info("Waiting for orchestrator at %s:%d (attempt %d)", host, port, attempt + 1)
             time.sleep(0.5)
     logger.info("Connected to orchestrator at %s:%d", host, port)
@@ -415,7 +428,7 @@ def main() -> None:
     # Start heartbeat thread
     shutdown_event = threading.Event()
     heartbeat = HeartbeatThread(
-        sock, args.name, shutdown_event, device_index=device_index, sock_lock=sock_lock
+        sock, args.name, shutdown_event, stats_fn, device_index=device_index, sock_lock=sock_lock
     )
     heartbeat.start()
 
@@ -540,7 +553,7 @@ def main() -> None:
                     row["rel_fro_err"],
                     row["bits_per_weight"],
                 )
-            except (RuntimeError, ValueError, KeyError, OSError) as e:
+            except InfrastructureError as e:
                 logger.exception("Error processing job %s", job.config.id)
                 with sock_lock:
                     send_frame(sock, VQErrorMessage(config_id=job.config.id, msg=str(e)))

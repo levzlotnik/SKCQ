@@ -32,11 +32,8 @@ def _extract_layer_idx(key: str) -> int | None:
     """Extract layer index from a safetensors key like 'model.language_model.layers.5.mlp...'."""
     parts = key.split(".")
     for i, p in enumerate(parts):
-        if p == "layers" and i + 1 < len(parts):
-            try:
-                return int(parts[i + 1])
-            except ValueError:
-                pass
+        if p == "layers" and i + 1 < len(parts) and parts[i + 1].lstrip("-").isdigit():
+            return int(parts[i + 1])
     return None
 
 

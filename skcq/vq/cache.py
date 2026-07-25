@@ -74,14 +74,10 @@ class PrimaryCodebookCache:
             if self._cache_dir is not None:
                 disk_path = self._cache_dir / f"{key}.pt"
                 if disk_path.exists():
-                    try:
-                        cb = torch.load(disk_path, map_location="cpu", weights_only=True)
-                        self._mem[key] = cb
-                        self._hits += 1
-                        return cb
-                    except Exception:
-                        logger.warning("Cache load failed for %s, removing", key)
-                        disk_path.unlink(missing_ok=True)
+                    cb = torch.load(disk_path, map_location="cpu", weights_only=True)
+                    self._mem[key] = cb
+                    self._hits += 1
+                    return cb
             self._misses += 1
             return None
 
@@ -91,10 +87,7 @@ class PrimaryCodebookCache:
             self._mem[key] = codebook.detach().cpu()
             if self._cache_dir is not None:
                 disk_path = self._cache_dir / f"{key}.pt"
-                try:
-                    torch.save(codebook.detach().cpu(), disk_path)
-                except Exception:
-                    logger.warning("Cache store failed for %s", key)
+                torch.save(codebook.detach().cpu(), disk_path)
 
     def stats(self) -> dict:
         """Return cache statistics for the dashboard."""

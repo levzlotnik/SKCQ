@@ -31,6 +31,7 @@ from safetensors import safe_open
 from skcq.codebook.aqlm import AQLMCodebook
 from skcq.codebook.cwr import AQLMCWR
 from skcq.config import CodebookParams, build_aqlm_codebook
+from skcq.errors import InfrastructureError
 from skcq.protocol import (
     DoneMessage,
     ErrorMessage,
@@ -89,11 +90,8 @@ def _extract_layer_idx(key: str) -> int | None:
     """Extract layer index from a safetensors key like 'model.language_model.layers.5.mlp...'."""
     parts = key.split(".")
     for i, p in enumerate(parts):
-        if p == "layers" and i + 1 < len(parts):
-            try:
-                return int(parts[i + 1])
-            except ValueError:
-                pass
+        if p == "layers" and i + 1 < len(parts) and parts[i + 1].lstrip("-").isdigit():
+            return int(parts[i + 1])
     return None
 
 
@@ -168,12 +166,22 @@ def process_job(
         cb_name = f"L{layer_idx}.{name}"
         logger.info(
             "Layer %d: building %s (k=%d, nb=%d, cb=%d)...",
-            layer_idx, name, k, n_blocks, params.n_codebooks,
+            layer_idx,
+            name,
+            k,
+            n_blocks,
+            params.n_codebooks,
         )
         aqlm = build_aqlm_codebook(
-            params, k=k, n_blocks=n_blocks, n_codebooks=params.n_codebooks,
-            in_dim=rows.shape[1], out_dim=out_dim, num_experts=num_experts,
-            device=device, name=cb_name,
+            params,
+            k=k,
+            n_blocks=n_blocks,
+            n_codebooks=params.n_codebooks,
+            in_dim=rows.shape[1],
+            out_dim=out_dim,
+            num_experts=num_experts,
+            device=device,
+            name=cb_name,
         )
         cwr = aqlm.fit(rows.to(device))
         results[name] = (aqlm, cwr)
@@ -245,7 +253,7 @@ def main() -> None:
                 if isinstance(ack, DoneMessage):
                     logger.info("Orchestrator says done after results — exiting")
                     break
-            except (RuntimeError, ValueError, KeyError, OSError) as e:
+            except InfrastructureError as e:
                 logger.exception("Error processing layer %d", msg.layer)
                 send_frame(sock, ErrorMessage(layer=msg.layer, msg=str(e)))
     finally:

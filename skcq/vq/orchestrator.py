@@ -24,6 +24,7 @@ from pathlib import Path
 
 import yaml
 
+from skcq.errors import InfrastructureError
 from skcq.protocol import (
     AckMessage,
     CacheRequestMessage,
@@ -291,9 +292,10 @@ class VQOrchestrator:
                 threading.Thread(target=self._handle_worker, args=(conn, addr), daemon=True).start()
             except TimeoutError:
                 continue
-            except OSError:
+            except OSError as ex:
                 if self.shutdown.is_set():
                     break
+                raise InfrastructureError("accept loop failed") from ex
 
     def launch(self) -> str:
         if self.state in ("running", "paused"):
@@ -306,8 +308,8 @@ class VQOrchestrator:
         def _run_wrapper():
             try:
                 self._run()
-            except Exception:
-                logger.exception("Orchestrator thread crashed")
+            except InfrastructureError:
+                logger.exception("Orchestrator thread infrastructure failure")
                 self.state = "idle"
 
         threading.Thread(target=_run_wrapper, daemon=True, name="orch").start()
@@ -341,8 +343,13 @@ class VQOrchestrator:
         for ws in self.workers_state.values():
             if ws.conn and ws.enabled and ws.connected:
                 try:
-                    send_frame(ws.conn, DisableMessage())
-                except OSError:
+                    try:
+                        send_frame(ws.conn, DisableMessage())
+                    except (ConnectionError, OSError) as ex:
+                        raise InfrastructureError(
+                            f"worker {ws.name} disconnected during shutdown"
+                        ) from ex
+                except InfrastructureError:
                     ws.connected = False
                     logger.debug("Worker %s already disconnected during shutdown", ws.name)
         time.sleep(1)
@@ -351,8 +358,9 @@ class VQOrchestrator:
                 proc.terminate()
                 try:
                     proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as ex:
                     proc.kill()
+                    raise InfrastructureError("worker proc didn't terminate after SIGTERM") from ex
         self.state = "idle"
         return self.state
 
@@ -370,9 +378,8 @@ class VQOrchestrator:
             proc = launch_worker_process(
                 cfg, self.port, self.orchestrator_host, self.model_id, self.layer
             )
-        except (OSError, FileNotFoundError) as e:
-            logger.error("Failed to launch %s: %s", name, e)
-            return f"launch failed: {e}"
+        except (OSError, FileNotFoundError) as ex:
+            raise InfrastructureError(f"failed to launch worker {name}") from ex
         ws.proc = proc
         ws.enabled = True
         ws.connected = False
@@ -393,8 +400,11 @@ class VQOrchestrator:
         # Tell worker to exit cleanly (finish in-flight, send result, exit)
         if ws.conn and ws.connected:
             try:
-                send_frame(ws.conn, DisableMessage())
-            except OSError:
+                try:
+                    send_frame(ws.conn, DisableMessage())
+                except (ConnectionError, OSError) as ex:
+                    raise InfrastructureError(f"worker {name} disconnected during disable") from ex
+            except InfrastructureError:
                 ws.connected = False
                 logger.debug("Worker %s already disconnected during disable", name)
         # Kill the process
@@ -402,8 +412,9 @@ class VQOrchestrator:
             ws.proc.terminate()
             try:
                 ws.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as ex:
                 ws.proc.kill()
+                raise InfrastructureError("worker proc didn't terminate after SIGTERM") from ex
         ws.connected = False
         return "disabled"
 
@@ -441,8 +452,9 @@ class VQOrchestrator:
                 proc.terminate()
                 try:
                     proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as ex:
                     proc.kill()
+                    raise InfrastructureError("worker proc didn't terminate after SIGTERM") from ex
         if self.server_sock:
             self.server_sock.close()
         logger.info(
@@ -458,127 +470,135 @@ class VQOrchestrator:
         current_job: str | None = None
         ws: WorkerState | None = None
         try:
-            while not self.shutdown.is_set():
-                msg: Message | None = recv_frame(conn)
-                if msg is None:
-                    break
+            try:
+                while not self.shutdown.is_set():
+                    msg: Message | None = recv_frame(conn)
+                    if msg is None:
+                        break
 
-                if isinstance(msg, WorkerInfoMessage):
-                    ws = self.workers_state.setdefault(
-                        msg.worker_name, WorkerState(msg.worker_name, msg.host)
-                    )
-                    ws.conn = conn
-                    ws.connected = True
-                    ws.devices = [d.__dict__ for d in msg.devices]
-                    worker_name = msg.worker_name
-                    logger.info("Worker %s connected: %d devices", worker_name, len(msg.devices))
-
-                elif isinstance(msg, HeartbeatMessage):
-                    ws = self.workers_state.get(msg.worker_name)
-                    if ws:
-                        ws.heartbeats.append(
-                            {
-                                "t": time.time(),
-                                "devices": [
-                                    {
-                                        "idx": d.index,
-                                        "alloc_mb": d.allocated_mb,
-                                        "reserved_mb": d.reserved_mb,
-                                        "used_mb": d.used_mb,
-                                        "util_pct": d.utilization_pct,
-                                    }
-                                    for d in msg.devices
-                                ],
-                            }
+                    if isinstance(msg, WorkerInfoMessage):
+                        ws = self.workers_state.setdefault(
+                            msg.worker_name, WorkerState(msg.worker_name, msg.host)
+                        )
+                        ws.conn = conn
+                        ws.connected = True
+                        ws.devices = [d.__dict__ for d in msg.devices]
+                        worker_name = msg.worker_name
+                        logger.info(
+                            "Worker %s connected: %d devices", worker_name, len(msg.devices)
                         )
 
-                elif isinstance(msg, ReadyMessage):
-                    ws = self.workers_state.get(worker_name)
-                    # Worker is ready. Wait until: (a) enabled AND sweep is
-                    # running, (b) shutdown, or (c) disabled → kill.
-                    while not self.shutdown.is_set():
-                        if ws is None or not ws.enabled:
-                            # Disabled: wait for re-enable or shutdown
-                            time.sleep(0.5)
-                            continue
-                        if self.state != "running":
-                            # Sweep not started yet — wait for launch()
-                            time.sleep(0.5)
-                            continue
-                        if self.pause_event.is_set():
-                            time.sleep(0.5)
-                            continue
-                        break
-                    if self.shutdown.is_set():
-                        send_frame(conn, DoneMessage())
-                        return
-                    if ws is None or not ws.enabled:
-                        send_frame(conn, DoneMessage())
-                        return
+                    elif isinstance(msg, HeartbeatMessage):
+                        ws = self.workers_state.get(msg.worker_name)
+                        if ws:
+                            ws.heartbeats.append(
+                                {
+                                    "t": time.time(),
+                                    "devices": [
+                                        {
+                                            "idx": d.index,
+                                            "alloc_mb": d.allocated_mb,
+                                            "reserved_mb": d.reserved_mb,
+                                            "used_mb": d.used_mb,
+                                            "util_pct": d.utilization_pct,
+                                        }
+                                        for d in msg.devices
+                                    ],
+                                }
+                            )
 
-                    # Try to get a job from the queue
-                    try:
-                        job_id = self.job_queue.get(timeout=1)
-                    except queue.Empty:
-                        if self.completed + len(self.failed) >= self.total:
+                    elif isinstance(msg, ReadyMessage):
+                        ws = self.workers_state.get(worker_name)
+                        # Worker is ready. Wait until: (a) enabled AND sweep is
+                        # running, (b) shutdown, or (c) disabled → kill.
+                        while not self.shutdown.is_set():
+                            if ws is None or not ws.enabled:
+                                # Disabled: wait for re-enable or shutdown
+                                time.sleep(0.5)
+                                continue
+                            if self.state != "running":
+                                # Sweep not started yet — wait for launch()
+                                time.sleep(0.5)
+                                continue
+                            if self.pause_event.is_set():
+                                time.sleep(0.5)
+                                continue
+                            break
+                        if self.shutdown.is_set():
                             send_frame(conn, DoneMessage())
                             return
-                        # No job available right now — loop back to ReadyMessage
-                        continue
-                        return
+                        if ws is None or not ws.enabled:
+                            send_frame(conn, DoneMessage())
+                            return
 
-                    current_job = job_id
-                    cfg = self.configs_by_id[job_id]
-                    ws = self.workers_state.get(worker_name)
-                    if ws:
-                        ws.current_job = job_id
-                    send_frame(conn, VQJobMessage(config=cfg, layer=self.layer))
+                        # Try to get a job from the queue
+                        try:
+                            job_id = self.job_queue.get(timeout=1)
+                        except queue.Empty:
+                            if self.completed + len(self.failed) >= self.total:
+                                send_frame(conn, DoneMessage())
+                                return
+                            # No job available right now — loop back to ReadyMessage
+                            continue
 
-                elif isinstance(msg, VQResultsMessage):
-                    with self.db_lock:
-                        insert_row(self.db, msg.row, msg.config_id, worker_name)
-                        for er in msg.extra_rows or []:
-                            eid = f"int_baseline_{er.get('scheme', 'unknown')}"
-                            insert_row(self.db, er, eid, worker_name)
-                    self.completed += 1
-                    ws = self.workers_state.get(worker_name)
-                    if ws:
-                        ws.current_job = None
-                    send_frame(conn, AckMessage())
-                    current_job = None
-                    if self.completed + len(self.failed) >= self.total:
-                        self.shutdown.set()
-                        return
+                        current_job = job_id
+                        cfg = self.configs_by_id[job_id]
+                        ws = self.workers_state.get(worker_name)
+                        if ws:
+                            ws.current_job = job_id
+                        send_frame(conn, VQJobMessage(config=cfg, layer=self.layer))
 
-                elif isinstance(msg, VQErrorMessage):
-                    logger.error("Worker %s error on %s: %s", worker_name, msg.config_id, msg.msg)
-                    if current_job == msg.config_id:
-                        self.failed.append(msg.config_id)
-                        current_job = None
+                    elif isinstance(msg, VQResultsMessage):
+                        with self.db_lock:
+                            insert_row(self.db, msg.row, msg.config_id, worker_name)
+                            for er in msg.extra_rows or []:
+                                eid = f"int_baseline_{er.get('scheme', 'unknown')}"
+                                insert_row(self.db, er, eid, worker_name)
+                        self.completed += 1
                         ws = self.workers_state.get(worker_name)
                         if ws:
                             ws.current_job = None
+                        send_frame(conn, AckMessage())
+                        current_job = None
+                        if self.completed + len(self.failed) >= self.total:
+                            self.shutdown.set()
+                            return
 
-                elif isinstance(msg, CacheRequestMessage):
-                    # Worker is asking for a cached primary codebook. Look up
-                    # the central cache (thread-safe) and send it back (or
-                    # None for a miss). The worker will train on miss and
-                    # send CacheStoreMessage so the next worker gets a hit.
-                    cb = self.cache.get(msg.key)
-                    send_frame(conn, CacheResponseMessage(key=msg.key, codebook=cb))
+                    elif isinstance(msg, VQErrorMessage):
+                        logger.error(
+                            "Worker %s error on %s: %s", worker_name, msg.config_id, msg.msg
+                        )
+                        if current_job == msg.config_id:
+                            self.failed.append(msg.config_id)
+                            current_job = None
+                            ws = self.workers_state.get(worker_name)
+                            if ws:
+                                ws.current_job = None
 
-                elif isinstance(msg, CacheStoreMessage):
-                    # Worker finished training a primary on a cache miss —
-                    # store it for other workers. Fire-and-forget (no reply).
-                    self.cache.put(msg.key, msg.codebook)
-                    logger.debug("Worker %s stored primary cache entry %s", worker_name, msg.key)
+                    elif isinstance(msg, CacheRequestMessage):
+                        # Worker is asking for a cached primary codebook. Look up
+                        # the central cache (thread-safe) and send it back (or
+                        # None for a miss). The worker will train on miss and
+                        # send CacheStoreMessage so the next worker gets a hit.
+                        cb = self.cache.get(msg.key)
+                        send_frame(conn, CacheResponseMessage(key=msg.key, codebook=cb))
 
-                elif isinstance(msg, ProgressMessage):
-                    ws = self.workers_state.get(worker_name)
-                    if ws:
-                        ws.progress = msg
+                    elif isinstance(msg, CacheStoreMessage):
+                        # Worker finished training a primary on a cache miss —
+                        # store it for other workers. Fire-and-forget (no reply).
+                        self.cache.put(msg.key, msg.codebook)
+                        logger.debug(
+                            "Worker %s stored primary cache entry %s", worker_name, msg.key
+                        )
 
-        except (ConnectionError, OSError) as e:
+                    elif isinstance(msg, ProgressMessage):
+                        ws = self.workers_state.get(worker_name)
+                        if ws:
+                            ws.progress = msg
+
+            except (ConnectionError, OSError) as ex:
+                raise InfrastructureError(f"worker {worker_name} connection lost") from ex
+        except InfrastructureError as e:
             logger.warning("Worker %s connection failed: %s", worker_name, e)
             if current_job:
                 self.job_queue.put(current_job)

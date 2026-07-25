@@ -59,7 +59,9 @@ def quantize_spherical_scales(cwr: SphericalCWR, cb: SphericalCodebook, scale_dt
         levels = 2 ** (bits - 1) - 1
         abs_max = scales.abs().max()
         if abs_max == 0:
-            cb.scale_quant = ScaleQuantState(scale_dtype=scale_dtype, q_scale=torch.tensor(0.0))
+            cb.scale_quant = ScaleQuantState(
+                scale_dtype=scale_dtype, q_scale=torch.tensor(0.0, device=scales.device)
+            )
             return
         q_scale = abs_max / levels
         q = torch.round(scales / q_scale).clamp(-levels, levels)
@@ -152,7 +154,7 @@ class SphericalCodebook(WeightsCodebookBase[SphericalCWR], Experiment):
             pooled = raw[:, :cov].reshape(n_rows * n_blocks, bs)
             pooled_zero = zero_mask.tile(n_blocks)
             labels, centroids_kd = self._cluster_block(
-                pooled, pooled_zero, device, name="spherical"
+                pooled, pooled_zero, device, name="spherical", block_idx=0, n_blocks=1
             )
             assignments = labels.reshape(n_rows, n_blocks).t().contiguous()
             self.directions = centroids_kd.t().contiguous().unsqueeze(0)  # (1, bs, K)
@@ -161,7 +163,12 @@ class SphericalCodebook(WeightsCodebookBase[SphericalCWR], Experiment):
             block_centroids: list[torch.Tensor] = []
             for b in range(n_blocks):
                 labels, centroids_kd = self._cluster_block(
-                    raw[:, b * bs : (b + 1) * bs], zero_mask, device, name=f"spherical blk={b}"
+                    raw[:, b * bs : (b + 1) * bs],
+                    zero_mask,
+                    device,
+                    name=f"spherical blk={b}",
+                    block_idx=b,
+                    n_blocks=n_blocks,
                 )
                 block_labels.append(labels)
                 block_centroids.append(centroids_kd.t().contiguous())
@@ -176,11 +183,9 @@ class SphericalCodebook(WeightsCodebookBase[SphericalCWR], Experiment):
             d[zero_mask] = 0.0
             scales[:, b] = torch.einsum("nd,nd->n", raw[:, b * bs : (b + 1) * bs], d)
 
-        remainder = raw[:, cov:].to(torch.bfloat16).cpu() if rem > 0 else None
+        remainder = raw[:, cov:].to(torch.bfloat16) if rem > 0 else None
 
-        self.directions = self.directions.to(torch.bfloat16).cpu()
-        assignments = assignments.cpu()
-        scales = scales.cpu()
+        self.directions = self.directions.to(torch.bfloat16)
 
         return SphericalCWR(idxs=assignments, scales=scales, remainder=remainder)
 
@@ -223,6 +228,8 @@ class SphericalCodebook(WeightsCodebookBase[SphericalCWR], Experiment):
         zero_mask: torch.Tensor,
         device: torch.device,
         name: str,
+        block_idx: int = 0,
+        n_blocks: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run cosine k-means on one block's data.
 
@@ -269,6 +276,8 @@ class SphericalCodebook(WeightsCodebookBase[SphericalCWR], Experiment):
                 name=name,
                 chunk_size=min(chunk_size, train_data.shape[0]),
                 raw_data=train_raw,
+                block_idx=block_idx,
+                n_blocks=n_blocks,
             )
         )
         self._forward_from(km, KmeansStartEvent)

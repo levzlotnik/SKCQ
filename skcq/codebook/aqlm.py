@@ -166,7 +166,7 @@ class AQLMCodebook(WeightsCodebookBase[AQLMCWR]):
         for b in range(n_blocks):
             cols = slice(b * bs, (b + 1) * bs)
             cb = sph_cb.directions[0] if sph_cb.shared else sph_cb.directions[b]
-            d = cb.float().t()[sph_cwr.idxs[b].to(device)].to(device)
+            d = cb.float().t()[sph_cwr.idxs[b]].to(device)
             d = d.clone()
             d[zero_mask] = 0.0
             pdir = d * signs[:, b * bs : (b + 1) * bs].to(device) if signs is not None else d
@@ -176,7 +176,7 @@ class AQLMCodebook(WeightsCodebookBase[AQLMCWR]):
             dot = torch.einsum("nd,nd->n", target, pdir)
             scale_new = dot / (pdir.norm(dim=-1) ** 2 + 1e-10)
             scale_new[zero_mask] = 0.0
-            sph_cwr.scales[:, b] = scale_new.cpu()
+            sph_cwr.scales[:, b] = scale_new
 
     # -----------------------------------------------------------------------
     # SSVQ unwrapping helpers

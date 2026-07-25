@@ -22,6 +22,8 @@ class KmeansStartEvent:
     k: int
     max_iters: int
     n_points: int
+    block_idx: int = 0
+    n_blocks: int = 1
 
 
 @dataclass
@@ -105,18 +107,45 @@ class Experiment:
 
 
 class TqdmListener:
+    """Renders k-means progress to stderr.
+
+    For non-shared codebooks (n_blocks > 1): shows a single block-level bar
+    that ticks once per block's k-means completion, postfix shows last block's
+    convergence. For shared codebooks (n_blocks == 1): shows the per-iteration
+    bar as before.
+    """
+
     def __init__(self) -> None:
         self._pbar: tqdm | None = None
+        self._n_blocks: int = 1
+        self._block_mode: bool = False
 
     def on_start(self, e: KmeansStartEvent) -> None:
-        self._pbar = tqdm(total=e.max_iters, desc=e.name, leave=True)
+        if e.n_blocks > 1:
+            if self._pbar is not None:
+                return
+            self._block_mode = True
+            self._n_blocks = e.n_blocks
+            self._pbar = tqdm(total=e.n_blocks, desc=e.name.split(" blk=")[0], leave=True)
+        else:
+            self._block_mode = False
+            self._pbar = tqdm(total=e.max_iters, desc=e.name, leave=True)
 
     def on_iter(self, e: KmeansIterEvent) -> None:
-        if self._pbar is not None:
+        if self._pbar is not None and not self._block_mode:
             self._pbar.update(1)
             self._pbar.set_postfix(moved=f"{e.moved:.6f}", empty=e.n_empty)
 
     def on_done(self, e: KmeansDoneEvent) -> None:
         if self._pbar is not None:
-            self._pbar.close()
-            self._pbar = None
+            if self._block_mode:
+                self._pbar.update(1)
+                self._pbar.set_postfix(
+                    iters=e.iters_run, conv=int(e.converged), moved=f"{e.final_moved:.6f}"
+                )
+                if self._pbar.n >= self._n_blocks:
+                    self._pbar.close()
+                    self._pbar = None
+            else:
+                self._pbar.close()
+                self._pbar = None

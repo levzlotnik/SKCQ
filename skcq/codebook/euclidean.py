@@ -67,28 +67,36 @@ class EuclideanCodebook(WeightsCodebookBase[EuclideanCWR], Experiment):
 
         if cfg.shared:
             pooled = raw[:, :cov].reshape(n_rows * n_blocks, bs)
-            labels = self._cluster_block(pooled, zero_mask.tile(n_blocks), device, name="euclidean")
-            # labels: (n_rows * n_blocks,) → reshape to (n_blocks, n_rows)
+            labels = self._cluster_block(
+                pooled,
+                zero_mask.tile(n_blocks),
+                device,
+                name="euclidean",
+                block_idx=0,
+                n_blocks=1,
+            )
             assignments = labels.reshape(n_rows, n_blocks).t().contiguous()
-            # centroids: (bs, K) → (1, bs, K)
             self.centroids = self._last_centroids.unsqueeze(0)
         else:
             block_labels: list[torch.Tensor] = []
             block_centroids: list[torch.Tensor] = []
             for b in range(n_blocks):
                 labels = self._cluster_block(
-                    raw[:, b * bs : (b + 1) * bs], zero_mask, device, name=f"euclidean blk={b}"
+                    raw[:, b * bs : (b + 1) * bs],
+                    zero_mask,
+                    device,
+                    name=f"euclidean blk={b}",
+                    block_idx=b,
+                    n_blocks=n_blocks,
                 )
                 block_labels.append(labels)
                 block_centroids.append(self._last_centroids)
             assignments = torch.stack(block_labels, dim=0)  # (n_blocks, n_rows)
             self.centroids = torch.stack(block_centroids, dim=0)  # (n_blocks, bs, K)
 
-        remainder = raw[:, cov:].to(torch.bfloat16).cpu() if rem > 0 else None
+        remainder = raw[:, cov:].to(torch.bfloat16) if rem > 0 else None
 
-        # Move to CPU (callers reconstruct on CPU by default)
-        self.centroids = self.centroids.to(torch.bfloat16).cpu()
-        assignments = assignments.cpu()
+        self.centroids = self.centroids.to(torch.bfloat16)
 
         return EuclideanCWR(idxs=assignments, remainder=remainder)
 
@@ -117,6 +125,8 @@ class EuclideanCodebook(WeightsCodebookBase[EuclideanCWR], Experiment):
         zero_mask: torch.Tensor,
         device: torch.device,
         name: str,
+        block_idx: int = 0,
+        n_blocks: int = 1,
     ) -> torch.Tensor:
         """Run euclidean k-means on one block's data. Returns labels (n_rows,)."""
         cfg = self.config
@@ -155,6 +165,8 @@ class EuclideanCodebook(WeightsCodebookBase[EuclideanCWR], Experiment):
                 device=device,
                 name=name,
                 chunk_size=min(chunk_size, train_data.shape[0]),
+                block_idx=block_idx,
+                n_blocks=n_blocks,
             )
         )
         self._forward_from(km, KmeansStartEvent)

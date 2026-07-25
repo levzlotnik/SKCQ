@@ -99,6 +99,7 @@ class _CodebookLayer(nn.Module):
         remainder: torch.Tensor | None = None,
         signs: torch.Tensor | None = None,
         scales: torch.Tensor | None = None,
+        scale_q_scale: torch.Tensor | None = None,
     ):
         super().__init__()
         self.n_blocks = n_blocks
@@ -110,11 +111,18 @@ class _CodebookLayer(nn.Module):
         self.codebook = nn.Parameter(codebook)
         self.register_buffer("assignments", assignments)
         if scales is not None:
-            self.scales = nn.Parameter(scales)
+            if scales.is_floating_point():
+                self.scales = nn.Parameter(scales)
+            else:
+                self.register_buffer("scales", scales)
         else:
             self.scales = None
+        if scale_q_scale is not None:
+            self.register_buffer("scale_q_scale", scale_q_scale)
         if remainder is None:
-            remainder = torch.zeros(num_experts, out_dim, 0, dtype=codebook.dtype)
+            remainder = torch.zeros(
+                num_experts, out_dim, 0, dtype=codebook.dtype, device=codebook.device
+            )
         self.rem = remainder.shape[-1]
         self.register_buffer("remainder", remainder)
         self.sign_cov = signs.shape[-1] if signs is not None else 0
@@ -200,6 +208,14 @@ class CodebookModule(nn.Module):
             n_blocks = assignments_3d.shape[1]
             block_size = getattr(cb, "block_size", centroids.shape[1])
             k = centroids.shape[-1]
+            # Extract scale dequant state (if the codebook is a SphericalCodebook
+            # with quantized scales, we need q_scale to dequantize at forward time)
+            scale_q_scale = None
+            if scales_3d is not None and not scales_3d.is_floating_point():
+                inner_cb = cb.inner if hasattr(cb, "inner") else cb
+                sq = getattr(inner_cb, "scale_quant", None)
+                if sq is not None and sq.q_scale is not None:
+                    scale_q_scale = sq.q_scale
             layer_list.append(
                 _CodebookLayer(
                     codebook=centroids,
@@ -211,6 +227,7 @@ class CodebookModule(nn.Module):
                     remainder=remainder_3d,
                     signs=signs_3d,
                     scales=scales_3d,
+                    scale_q_scale=scale_q_scale,
                 )
             )
 
@@ -310,6 +327,8 @@ class CodebookModule(nn.Module):
         prim = p(hidden_states, expert_idx)
         if p.has_scale and p.scales is not None:
             scale = p.scales[expert_idx]
+            if not scale.is_floating_point():
+                scale = scale.float() * p.scale_q_scale
             out = (prim * scale.unsqueeze(1)).sum(dim=0)
         else:
             out = prim.sum(dim=0)

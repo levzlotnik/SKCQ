@@ -88,6 +88,8 @@ class KmeansConfig:
     name: str
     chunk_size: int
     raw_data: torch.Tensor | None = None  # cosine: raw (unnormalized) for norm-weighted update
+    block_idx: int = 0
+    n_blocks: int = 1
 
 
 class KmeansExperiment(Experiment):
@@ -112,7 +114,13 @@ class KmeansExperiment(Experiment):
 
         self._emit(
             KmeansStartEvent(
-                name=cfg.name, metric=cfg.metric, k=k_eff, max_iters=cfg.max_iters, n_points=n
+                name=cfg.name,
+                metric=cfg.metric,
+                k=k_eff,
+                max_iters=cfg.max_iters,
+                n_points=n,
+                block_idx=cfg.block_idx,
+                n_blocks=cfg.n_blocks,
             )
         )
 

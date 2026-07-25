@@ -27,6 +27,7 @@ from skcq.codebook.aqlm import AQLMCodebook
 from skcq.codebook.cwr import AQLMCWR
 from skcq.codebook_experts import CodebookModule
 from skcq.config import CodebookParams, ExperimentConfig
+from skcq.errors import InfrastructureError
 from skcq.protocol import (
     AckMessage,
     DoneMessage,
@@ -203,81 +204,86 @@ class Orchestrator:
         current_job: int | None = None
 
         try:
-            while not self.shutdown.is_set():
-                msg: Message | None = recv_frame(conn)
-                if msg is None:
-                    logger.warning("Worker %s disconnected", worker_name)
-                    if current_job is not None:
-                        logger.info("Re-queueing layer %d (worker disconnect)", current_job)
-                        self.job_queue.put(current_job)
-                    return
-
-                if isinstance(msg, ReadyMessage):
-                    while not self.shutdown.is_set():
-                        try:
-                            job_idx = self.job_queue.get(timeout=1)
-                        except queue.Empty:
-                            if self.completed >= self.num_layers:
-                                send_frame(conn, DoneMessage())
-                                return
-                            continue
-                        current_job = job_idx
-                        break
-                    if self.shutdown.is_set():
-                        send_frame(conn, DoneMessage())
+            try:
+                while not self.shutdown.is_set():
+                    msg: Message | None = recv_frame(conn)
+                    if msg is None:
+                        logger.warning("Worker %s disconnected", worker_name)
+                        if current_job is not None:
+                            logger.info("Re-queueing layer %d (worker disconnect)", current_job)
+                            self.job_queue.put(current_job)
                         return
-                    job = _build_job(
-                        self.exp_config,
-                        self.model_id,
-                        job_idx,
-                        self.model_config,
-                    )
-                    logger.info("Dispatching layer %d to %s", job_idx, worker_name)
-                    send_frame(conn, job)
 
-                elif isinstance(msg, ResultsMessage):
-                    with self.results_lock:
-                        self.layer_results[msg.layer] = msg.data
-                        self.completed += 1
-                    _save_layer_results(
-                        msg.data,
-                        self.output_dir,
-                        msg.layer,
-                        self.model_config.hidden_size,
-                        self.model_config.moe_intermediate_size,
-                    )
-                    current_job = None
-                    logger.info(
-                        "Layer %d complete (%d/%d)",
-                        msg.layer,
-                        self.completed,
-                        self.num_layers,
-                    )
-                    send_frame(conn, AckMessage())
+                    if isinstance(msg, ReadyMessage):
+                        job_idx: int | None = None
+                        while not self.shutdown.is_set():
+                            try:
+                                job_idx = self.job_queue.get(timeout=1)
+                            except queue.Empty:
+                                if self.completed >= self.num_layers:
+                                    send_frame(conn, DoneMessage())
+                                    return
+                                continue
+                            current_job = job_idx
+                            break
+                        if self.shutdown.is_set():
+                            send_frame(conn, DoneMessage())
+                            return
+                        assert job_idx is not None
+                        job = _build_job(
+                            self.exp_config,
+                            self.model_id,
+                            job_idx,
+                            self.model_config,
+                        )
+                        logger.info("Dispatching layer %d to %s", job_idx, worker_name)
+                        send_frame(conn, job)
 
-                    if self.completed >= self.num_layers:
+                    elif isinstance(msg, ResultsMessage):
+                        with self.results_lock:
+                            self.layer_results[msg.layer] = msg.data
+                            self.completed += 1
+                        _save_layer_results(
+                            msg.data,
+                            self.output_dir,
+                            msg.layer,
+                            self.model_config.hidden_size,
+                            self.model_config.moe_intermediate_size,
+                        )
+                        current_job = None
                         logger.info(
-                            "All %d layers complete — shutting down workers",
+                            "Layer %d complete (%d/%d)",
+                            msg.layer,
+                            self.completed,
                             self.num_layers,
                         )
-                        self.shutdown.set()
-                        while not self.job_queue.empty():
-                            self.job_queue.get()
-                        return
+                        send_frame(conn, AckMessage())
 
-                elif isinstance(msg, ErrorMessage):
-                    logger.error(
-                        "Worker %s error on layer %d: %s",
-                        worker_name,
-                        msg.layer,
-                        msg.msg,
-                    )
-                    if current_job == msg.layer:
-                        logger.info("Re-queueing layer %d (worker error)", msg.layer)
-                        self.job_queue.put(msg.layer)
-                        current_job = None
+                        if self.completed >= self.num_layers:
+                            logger.info(
+                                "All %d layers complete — shutting down workers",
+                                self.num_layers,
+                            )
+                            self.shutdown.set()
+                            while not self.job_queue.empty():
+                                self.job_queue.get()
+                            return
 
-        except (ConnectionError, OSError) as e:
+                    elif isinstance(msg, ErrorMessage):
+                        logger.error(
+                            "Worker %s error on layer %d: %s",
+                            worker_name,
+                            msg.layer,
+                            msg.msg,
+                        )
+                        if current_job == msg.layer:
+                            logger.info("Re-queueing layer %d (worker error)", msg.layer)
+                            self.job_queue.put(msg.layer)
+                            current_job = None
+
+            except (ConnectionError, OSError) as ex:
+                raise InfrastructureError(f"worker {worker_name} connection lost") from ex
+        except InfrastructureError as e:
             logger.warning("Worker %s connection failed: %s", worker_name, e)
             if current_job is not None:
                 logger.info("Re-queueing layer %d (connection lost)", current_job)
@@ -308,10 +314,12 @@ class Orchestrator:
                 t = threading.Thread(target=self._handle_worker, args=(conn, addr), daemon=True)
                 t.start()
                 threads.append(t)
-            except OSError as e:
+            except TimeoutError:
+                continue
+            except OSError as ex:
                 if self.shutdown.is_set():
                     break
-                logger.error("Accept failed: %s", e)
+                raise InfrastructureError("accept failed") from ex
 
         self.shutdown.set()
 
@@ -323,9 +331,10 @@ class Orchestrator:
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as ex:
                     proc.kill()
                     proc.wait()
+                    raise InfrastructureError("worker proc didn't terminate after SIGTERM") from ex
 
         server.close()
         logger.info(

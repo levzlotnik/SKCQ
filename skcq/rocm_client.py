@@ -13,6 +13,7 @@ import torch
 from skcq.codebook.aqlm import AQLMCodebook
 from skcq.codebook.cwr import AQLMCWR
 from skcq.config import CodebookParams
+from skcq.errors import InfrastructureError
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,10 @@ class RocmClient:
                 self._proc.terminate()
                 try:
                     self._proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as ex:
                     self._proc.kill()
                     self._proc.wait()
+                    raise InfrastructureError(
+                        "cuda subprocess didn't terminate after SIGTERM"
+                    ) from ex
             self._proc = None

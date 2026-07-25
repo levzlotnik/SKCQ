@@ -5,6 +5,7 @@ from skcq.codebook.aqlm import AQLMCodebookConfig as AQLMCodebookConfig
 from skcq.codebook.cwr import AQLMCWR as AQLMCWR
 from skcq.codebook.cwr import CompressedWeightsRepresentation as CompressedWeightsRepresentation
 from skcq.codebook_experts import CodebookExperts as CodebookExperts
+from skcq.errors import InfrastructureError as InfrastructureError
 from skcq.logging_setup import setup_logging as setup_logging
 from skcq.measurements import Measurements as Measurements
 from skcq.measurements import install_measurement_hooks as install_measurement_hooks

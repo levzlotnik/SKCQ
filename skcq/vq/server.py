@@ -50,10 +50,8 @@ def fetch_results(db: sqlite3.Connection, db_lock: threading.Lock) -> list[dict]
             d = dict(r)
             d["shared"] = bool(d["shared"])
             d["sign_split"] = bool(d["sign_split"])
-            try:
-                d["residual_block_sizes"] = json.loads(d.get("residual_block_sizes") or "[]")
-            except TypeError, json.JSONDecodeError:
-                d["residual_block_sizes"] = []
+            raw = d.get("residual_block_sizes")
+            d["residual_block_sizes"] = json.loads(raw) if raw else []
             rows.append(d)
     return rows
 

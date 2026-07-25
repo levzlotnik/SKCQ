@@ -50,7 +50,7 @@ class SSVQCodebook(WeightsCodebookBase[SSVQCWR], Experiment):
         # But we only need signs over the covered region (cov columns)
         # The inner codebook's block structure determines cov.
         # We store the full signs and let reconstruct slice appropriately.
-        signs_int8 = signs.to(torch.int8).cpu()
+        signs_int8 = signs.to(torch.int8)
 
         return SSVQCWR(inner=inner_cwr, signs=signs_int8)
 
